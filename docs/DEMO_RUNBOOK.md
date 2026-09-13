@@ -210,8 +210,10 @@ Proxy 恢复后再次执行即可恢复真实诊断，无需重启设备。
 python3 docs/tools/manage_demo_target.py stop
 ```
 
-Agent 已经给出针对 `demo` 的 critical + `restart_service` 建议后，再明确请求修复。
-Skill 要求当前会话已有该诊断才允许执行，合并成一句 ask 无效；两步 ask 也不能背靠背
+Agent 已经给出针对 `demo` 的 critical + `restart_service` 建议后，Skill 要求先调用
+`velaops_record_diagnosis` 将新鲜证据形成 120 秒有效的结构化短期计划，再明确请求修复。
+设备侧只接受 `critical/restart_service/demo` 和 0..1 置信度；warning、过期计划或额外
+字段都不能解锁修复。当前会话已有该诊断才允许执行，合并成一句 ask 无效；两步 ask 也不能背靠背
 连发（②会先于①完成被消费），必须等①的诊断 JSON 出现后再发②。已真机验证的有效措辞：
 
 ```bash

@@ -14,6 +14,7 @@ AI 硬件产品创新。
 - `server-incident-response` Markdown Skill 约束诊断顺序、输出结构和安全边界。
 - `velaops_check_resources` 只读工具获取内存、磁盘、服务和端口证据。
 - 后台巡检对异常进行连续采样、去抖和去重，主动注入 `opened`/`recovered` 事件。
+- `velaops_record_diagnosis` 把 Agent 基于新鲜证据得出的 critical 修复计划收敛为设备侧短期状态，过期或不匹配的计划不能进入执行。
 - `velaops_restart_service` 只允许修复固定白名单服务，并要求 BOOT 长按实体批准。
 - 修复后使用新的 request ID 再次取证，不把 Action 返回值直接当作恢复结论。
 - ST7789 LCD 显示资源看板、故障状态和 Agent 弹窗；`velaops_show_message` 已真机验证显示 `TEST-OK`。
@@ -102,6 +103,20 @@ Debug GUI 的 `TEST-OK` 请求会经过：
 ```text
 GUI → ask 队列 → ai_agent → MiMo → velaops_show_message → LCD
 ```
+
+故障恢复演示则是完整的 Agent 闭环，而不是聊天回复：
+
+```text
+主动巡检 → 新鲜资源证据 → MiMo 结构化 critical 诊断
+  → velaops_record_diagnosis（120 秒短期计划）
+  → 用户明确请求 + BOOT 实体批准
+  → velaops_restart_service（固定 demo 白名单）
+  → 新 request ID 复核服务/端口 → LCD 与 Proxy 审计显示 recovered
+```
+
+设备侧只接受固定枚举、目标和置信度范围；模型不能传入 shell、服务名、批准字段或
+任意 Action。诊断计划与执行分离，复核证据独立于 Action 返回值，因而可以展示
+Agent 的判断、编排和受控执行能力，而不是把 LLM 当作聊天机器人。
 
 ## 测试
 

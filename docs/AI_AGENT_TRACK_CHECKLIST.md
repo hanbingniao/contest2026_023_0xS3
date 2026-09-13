@@ -20,8 +20,11 @@
   `check_resources`，不接受目标、Action 或命令参数。
 - 主动场景：首次成功只读工具调用后启动生命周期安全的后台巡检；资源阈值异常经
   去抖、去重后自动注入 Agent，恢复事件同样注入并要求重新取证。
-- 执行场景：固定无参数 Tool `velaops_restart_service` 等待实体 BOOT 长按，调用
-  白名单修复并使用新 request ID 独立复核；LLM 不提供服务、命令或批准字段。
+- 执行场景：Agent 先用新鲜证据调用 `velaops_record_diagnosis` 写入
+  `critical/restart_service/demo` 短期计划，再由固定无参数 Tool
+  `velaops_restart_service` 等待实体 BOOT 长按，调用白名单修复并使用新 request ID
+  独立复核；LLM 不提供服务、命令或批准字段。计划过期、枚举不匹配或缺少实体批准时，
+  设备侧拒绝执行。
 
 ## 当前验收边界
 
@@ -32,6 +35,8 @@
   处理。实体批准的设备闭环已真机通过：不按键安全超时且无变更审计，长按后仅执行
   一次重启并独立复核恢复。自然语言两步请求已真实调用
   `velaops_restart_service`，完成唯一服务重启和独立复核。
+- 结构化诊断门控已通过主机边界测试：warning 诊断不能解锁修复，critical 计划只能
+  在 120 秒内使用一次；修复结果仍需独立资源复核。
 - Debug GUI 已通过文件队列 Channel 触发 MiMo 调用
   `velaops_show_message({"text":"TEST-OK"})`；ESP32-S3-EYE LCD 真机弹窗和 GUI
   成功标记均已验收。MiMo 通过仅绑定开发机局域网地址、仅允许板端 IP 的受限转发器

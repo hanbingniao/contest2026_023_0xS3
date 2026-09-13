@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cJSON.h"
 #include "tools/tool_registry.h"
@@ -16,13 +17,17 @@
 #define VELAOPS_AGENT_TOOL_NAME "velaops_check_resources"
 #define VELAOPS_AGENT_REPAIR_TOOL_NAME "velaops_restart_service"
 #define VELAOPS_AGENT_MESSAGE_TOOL_NAME "velaops_show_message"
+#define VELAOPS_AGENT_DIAGNOSIS_TOOL_NAME "velaops_record_diagnosis"
 #define VELAOPS_AGENT_EVIDENCE_SCHEMA_VERSION 1
 #define VELAOPS_AGENT_FETCH_CAPACITY 2048
+#define VELAOPS_AGENT_DIAGNOSIS_TTL_SECONDS 120
 
 static velaops_resource_fetcher_t g_resource_fetcher;
 static velaops_agent_monitor_starter_t g_monitor_starter;
 static velaops_service_repairer_t g_service_repairer;
 static bool g_provider_registered;
+static bool g_diagnosis_valid;
+static time_t g_diagnosis_recorded_at;
 
 static char *velaops_agent_get_tools_json(void)
 {
@@ -53,7 +58,19 @@ static char *velaops_agent_get_tools_json(void)
       "state.\","
       "\"input_schema\":{\"type\":\"object\",\"properties\":"
       "{\"text\":{\"type\":\"string\",\"maxLength\":16}},"
-      "\"required\":[\"text\"],\"additionalProperties\":false}}]";
+      "\"required\":[\"text\"],\"additionalProperties\":false}},"
+      "{\"name\":\"velaops_record_diagnosis\","
+      "\"description\":\"Record the AI Agent's structured critical diagnosis before any repair. "
+      "Call after fresh evidence only when status=critical, action=restart_service, target=demo. "
+      "This bounded plan expires after 120 seconds.\","
+      "\"input_schema\":{\"type\":\"object\",\"properties\":{"
+      "\"status\":{\"type\":\"string\"},"
+      "\"action\":{\"type\":\"string\"},"
+      "\"target\":{\"type\":\"string\"},"
+      "\"confidence\":{\"type\":\"number\"},"
+      "\"summary\":{\"type\":\"string\",\"maxLength\":128}},"
+      "\"required\":[\"status\",\"action\",\"target\",\"confidence\"],"
+      "\"additionalProperties\":false}}]";
   char *copy;
 
   copy = malloc(sizeof(tools_json));
@@ -168,6 +185,68 @@ static int velaops_agent_show_message(const char *input_json, char *output,
              : ERROR;
 }
 
+/*
+ * 将模型的判断收敛为设备侧可验证的短期计划。模型不能直接把自然语言
+ * 变成变更动作，必须先提交结构化诊断，再经过用户明确请求和实体按键批准。
+ */
+static int velaops_agent_record_diagnosis(const char *input_json, char *output,
+                                          size_t output_capacity)
+{
+  cJSON *root;
+  cJSON *status;
+  cJSON *action;
+  cJSON *target;
+  cJSON *confidence;
+  cJSON *summary;
+  double confidence_value;
+  int length;
+
+  root = cJSON_Parse(input_json == NULL ? "{}" : input_json);
+  status = root == NULL ? NULL : cJSON_GetObjectItem(root, "status");
+  action = root == NULL ? NULL : cJSON_GetObjectItem(root, "action");
+  target = root == NULL ? NULL : cJSON_GetObjectItem(root, "target");
+  confidence = root == NULL ? NULL : cJSON_GetObjectItem(root, "confidence");
+  summary = root == NULL ? NULL : cJSON_GetObjectItem(root, "summary");
+  confidence_value = cJSON_IsNumber(confidence) ? confidence->valuedouble : -1.0;
+
+  if (!cJSON_IsObject(root) || cJSON_GetArraySize(root) < 4 ||
+      cJSON_GetArraySize(root) > 5 || !cJSON_IsString(status) ||
+      !cJSON_IsString(action) || !cJSON_IsString(target) ||
+      !cJSON_IsNumber(confidence) ||
+      strcmp(status->valuestring, "critical") != 0 ||
+      strcmp(action->valuestring, "restart_service") != 0 ||
+      strcmp(target->valuestring, "demo") != 0 ||
+      confidence_value < 0.0 || confidence_value > 1.0 ||
+      (summary != NULL && (!cJSON_IsString(summary) ||
+                           strlen(summary->valuestring) > 128)))
+    {
+      cJSON_Delete(root);
+      return ERROR;
+    }
+
+  /*
+   * 只记录“当前”诊断的时间戳，不信任模型传入的时间、审批或执行结果。
+   * 修复工具会再次检查 TTL，防止旧诊断被重放。
+   */
+  g_diagnosis_recorded_at = time(NULL);
+  g_diagnosis_valid = g_diagnosis_recorded_at >= 0;
+  cJSON_Delete(root);
+  if (!g_diagnosis_valid)
+    {
+      return ERROR;
+    }
+  length = snprintf(
+      output, output_capacity,
+      "{\"schema_version\":1,\"diagnosis_recorded\":true,"
+      "\"status\":\"critical\",\"action\":\"restart_service\","
+      "\"target\":\"demo\",\"expires_in_seconds\":%d}",
+      VELAOPS_AGENT_DIAGNOSIS_TTL_SECONDS);
+  return length >= 0 && output_capacity > 0 &&
+                 (size_t)length < output_capacity
+             ? OK
+             : ERROR;
+}
+
 static int velaops_agent_execute_tool(const char *name,
                                       const char *input_json, char *output,
                                       size_t output_capacity)
@@ -185,14 +264,33 @@ static int velaops_agent_execute_tool(const char *name,
        * 参数在屏显层再次净化。 */
       return velaops_agent_show_message(input_json, output, output_capacity);
     }
+  if (strcmp(name, VELAOPS_AGENT_DIAGNOSIS_TOOL_NAME) == 0)
+    {
+      return velaops_agent_record_diagnosis(input_json, output,
+                                            output_capacity);
+    }
   if (!velaops_agent_has_no_arguments(input_json))
     {
       return ERROR;
     }
   if (strcmp(name, VELAOPS_AGENT_REPAIR_TOOL_NAME) == 0)
     {
-      return g_service_repairer == NULL ? ERROR :
-             g_service_repairer(output, output_capacity);
+      time_t now = time(NULL);
+      if (g_service_repairer == NULL || !g_diagnosis_valid ||
+          now < g_diagnosis_recorded_at ||
+          now - g_diagnosis_recorded_at > VELAOPS_AGENT_DIAGNOSIS_TTL_SECONDS)
+        {
+          int length = snprintf(
+              output, output_capacity,
+              "{\"schema_version\":1,\"execution_state\":\"not_started\","
+              "\"verified\":false,\"status\":\"diagnosis_required\"}");
+          return length >= 0 && output_capacity > 0 &&
+                         (size_t)length < output_capacity
+                     ? OK
+                     : ERROR;
+        }
+      g_diagnosis_valid = false;
+      return g_service_repairer(output, output_capacity);
     }
   if (strcmp(name, VELAOPS_AGENT_TOOL_NAME) != 0 ||
       g_resource_fetcher == NULL)

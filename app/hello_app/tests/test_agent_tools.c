@@ -134,7 +134,7 @@ static void test_registration_and_schema(void)
   tools = cJSON_Parse(tools_json);
   free(tools_json);
   EXPECT(cJSON_IsArray(tools));
-  EXPECT(cJSON_GetArraySize(tools) == 3);
+  EXPECT(cJSON_GetArraySize(tools) == 4);
   tool = cJSON_GetArrayItem(tools, 0);
   EXPECT(cJSON_IsString(cJSON_GetObjectItemCaseSensitive(tool, "name")));
   EXPECT(strcmp(cJSON_GetObjectItemCaseSensitive(tool, "name")->valuestring,
@@ -162,6 +162,12 @@ static void test_registration_and_schema(void)
       schema, "properties")));
   EXPECT(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(
       schema, "additionalProperties")));
+  tool = cJSON_GetArrayItem(tools, 3);
+  EXPECT(strcmp(cJSON_GetObjectItemCaseSensitive(tool, "name")->valuestring,
+                "velaops_record_diagnosis") == 0);
+  EXPECT(strstr(cJSON_GetObjectItemCaseSensitive(tool, "description")
+                    ->valuestring,
+                "structured critical diagnosis") != NULL);
   cJSON_Delete(tools);
 }
 
@@ -180,6 +186,10 @@ static void test_execution_boundary(void)
   EXPECT(g_execute("velaops_restart_service", "{\"service\":\"other\"}",
                    output, sizeof(output)) != 0);
   EXPECT(g_repair_calls == 0);
+  EXPECT(g_execute("velaops_record_diagnosis",
+                   "{\"status\":\"critical\",\"action\":\"restart_service\","
+                   "\"target\":\"demo\",\"confidence\":0.9}",
+                   output, sizeof(output)) == 0);
   EXPECT(g_execute("velaops_restart_service", "{}", output,
                    sizeof(output)) == 0);
   EXPECT(g_repair_calls == 1);
@@ -250,11 +260,41 @@ static void test_show_message_boundary(void)
   cJSON_Delete(root);
 }
 
+static void test_diagnosis_gate(void)
+{
+  char output[256];
+  cJSON *root;
+
+  EXPECT(g_execute("velaops_record_diagnosis",
+                   "{\"status\":\"warning\",\"action\":\"restart_service\","
+                   "\"target\":\"demo\",\"confidence\":0.9}",
+                   output, sizeof(output)) != 0);
+  EXPECT(g_execute("velaops_restart_service", "{}", output,
+                   sizeof(output)) == 0);
+  root = cJSON_Parse(output);
+  EXPECT(strcmp(cJSON_GetObjectItemCaseSensitive(root, "status")->valuestring,
+                "diagnosis_required") == 0);
+  cJSON_Delete(root);
+  EXPECT(g_execute("velaops_record_diagnosis",
+                   "{\"status\":\"critical\",\"action\":\"restart_service\","
+                   "\"target\":\"demo\",\"confidence\":0.95,"
+                   "\"summary\":\"demo service unavailable\"}",
+                   output, sizeof(output)) == 0);
+  root = cJSON_Parse(output);
+  EXPECT(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(
+      root, "diagnosis_recorded")));
+  cJSON_Delete(root);
+  EXPECT(g_execute("velaops_restart_service", "{}", output,
+                   sizeof(output)) == 0);
+  EXPECT(g_repair_calls == 2);
+}
+
 int main(void)
 {
   test_registration_and_schema();
   test_execution_boundary();
   test_show_message_boundary();
+  test_diagnosis_gate();
   if (g_failures != 0)
     {
       return EXIT_FAILURE;
