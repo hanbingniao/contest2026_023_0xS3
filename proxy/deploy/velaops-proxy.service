@@ -1,0 +1,38 @@
+[Unit]
+Description=VelaOps trusted operations proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=velaops-proxy
+Group=velaops-proxy
+WorkingDirectory=/opt/velaops-proxy
+Environment=PYTHONPATH=/opt/velaops-proxy/src
+ExecStart=/usr/bin/python3 -m velaops_proxy --config /etc/velaops-proxy/proxy.json
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+UMask=0077
+
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+ReadWritePaths=/var/lib/velaops-proxy /var/log/velaops-proxy
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+[project]
+name = "velaops-proxy"
+version = "0.1.0"
+description = "VelaOps Sentinel trusted LAN operations proxy"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"

@@ -1,0 +1,23 @@
+diff --git a/arch/xtensa/src/esp32s3/esp32s3_wifi_adapter.c b/arch/xtensa/src/esp32s3/esp32s3_wifi_adapter.c
+index ce697ab4df5..3cf12f601b0 100644
+--- a/arch/xtensa/src/esp32s3/esp32s3_wifi_adapter.c
++++ b/arch/xtensa/src/esp32s3/esp32s3_wifi_adapter.c
+@@ -2188,7 +2188,7 @@ static void esp_evt_work_cb(void *arg)
+                 wlerr("ERROR: Failed to set Wi-Fi station link status\n");
+               }
+ 
+-            if (g_sta_reconnect)
++            if (g_sta_reconnect && g_sta_started)
+               {
+                 ret = esp_wifi_connect();
+                 if (ret)
+@@ -4787,6 +4787,9 @@ int esp_wifi_sta_stop(void)
+ 
+   esp_wifi_lock(true);
+ 
++  /* Prevent queued disconnect events from reconnecting during teardown. */
++  g_sta_reconnect = false;
++
+   ret = esp_wifi_stop();
+   if (ret)
+     {

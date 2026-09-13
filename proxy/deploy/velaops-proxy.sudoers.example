@@ -1,0 +1,4 @@
+# 安装前使用 visudo -cf 校验；每个 unit 必须与 proxy.json 中的白名单完全一致。
+Cmnd_Alias VELAOPS_RESTART = /usr/bin/systemctl restart -- nginx.service
+velaops-proxy ALL=(root) NOPASSWD: VELAOPS_RESTART
+Defaults:velaops-proxy !requiretty

@@ -1,0 +1,14 @@
+{
+  "version": "1",
+  "secret_utf8": "test-secret-0123456789abcdefABCD",
+  "method": "POST",
+  "target": "/v1/actions/execute?dry_run=false",
+  "body_utf8": "{\"action\":\"check_service\",\"target\":\"server-01\"}",
+  "device_id": "eye-001",
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "timestamp": 1787582400,
+  "nonce": "abcdef0123456789abcdef0123456789",
+  "body_sha256": "0bf6a4efbdd2cbe3659f712ede0a276c3bc1a30ac9061bdf84a5940d1eda3bd2",
+  "canonical_utf8": "VELAOPS-HMAC-SHA256\n1\neye-001\n0123456789abcdef0123456789abcdef\n1787582400\nabcdef0123456789abcdef0123456789\nPOST\n/v1/actions/execute?dry_run=false\n0bf6a4efbdd2cbe3659f712ede0a276c3bc1a30ac9061bdf84a5940d1eda3bd2",
+  "signature_hex": "2f6508ab642c4924b0544540a3342e5293e66a1cec28c82b49129a7231a877a3"
+}

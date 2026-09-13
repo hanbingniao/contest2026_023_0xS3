@@ -1,148 +1,133 @@
-# contest2026_023_0xS3
+# VelaOps Sentinel（维拉哨兵）
 
-👋 欢迎参加 **2026 首届 openvela AI 硬件开发者大赛**！
+VelaOps Sentinel 是一台运行在 ESP32-S3-EYE、openvela 与 `ai_agent` 上的桌面式可信服务器运维 Agent。设备通过受限 Proxy 获取服务器资源证据，由自定义 Skill 和 MiMo 生成结构化诊断；涉及变更时，必须由用户长按实体 BOOT 键批准，执行后再独立复核服务状态。
 
-这是组委会为你的队伍创建的**专属参赛仓库**（本仓为样例/模板，队伍编号 `023`；你看到的将是你自己的 `contest2026_<编号>_<队伍名>`）。比赛期间，你的全部参赛代码、打包产物与 AI Coding 日志都提交到这里。
+## 选题方向
 
-> 本仓既是「代码仓」，又内置了一键拉取整套 openvela 工程的 `repo` 清单（manifest）。你只需跟它打交道，**自始至终只动一个文件夹**。
+AI 硬件产品创新。
 
----
+项目把服务器巡检、AI 分析、物理授权、白名单修复和结果复核收敛到一块常驻桌面的硬件上，面向小团队、个人开发者、家庭实验室和高校实验室。
 
-## 一、先读这些官方文档
+## 核心能力
 
-**通用（所有赛道必读）：**
+- ESP32-S3-EYE 真机运行 openvela 与 `ai_agent`，使用 MiMo 作为 LLM 后端。
+- `server-incident-response` Markdown Skill 约束诊断顺序、输出结构和安全边界。
+- `velaops_check_resources` 只读工具获取内存、磁盘、服务和端口证据。
+- 后台巡检对异常进行连续采样、去抖和去重，主动注入 `opened`/`recovered` 事件。
+- `velaops_restart_service` 只允许修复固定白名单服务，并要求 BOOT 长按实体批准。
+- 修复后使用新的 request ID 再次取证，不把 Action 返回值直接当作恢复结论。
+- ST7789 LCD 显示资源看板、故障状态和 Agent 弹窗；`velaops_show_message` 已真机验证显示 `TEST-OK`。
+- MiMo 不可用时可使用本地规则降级，安全输出结构化诊断且不执行变更。
 
-| 文档                                                                                                                                     | 用途                                           |
-| ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| [《大赛总览》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/contest_overview.md)                        | 赛道、流程、评分、资源，建议先通读             |
-| [《参赛代码提交指南》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/code_submission_guide.md)           | 仓库获取、提交流程、时间与权限（**以此为准**） |
-| [《AI Coding 日志归集与提交手册》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_coding_log_guide.md) | 如何导出 AI 对话日志并提交到 `logs/`           |
-
-**按你的赛道选读（三选一）：**
-
-| 赛道                  | 教程导航                                                                                                                                                 |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 快应用 / 手表应用创新 | [快应用教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/quickapp/quickapp_guide_index.md)                         |
-| AI 硬件产品创新       | [AI 硬件赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_hardware/ai_hardware_guide_index.md)              |
-| 新硬件适配            | [新硬件适配赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/hardware_porting/hardware_porting_guide_index.md) |
-
----
-
-## 二、第一步：拉取完整工程
-
-用组委会提供的命令一键拉取「openvela 全量源码 + 你的专属仓」：
-
-```bash
-repo init -u https://github.com/open-vela/contest2026_023_0xS3 \
-  -b dev-ai-contest-2026 -m contest2026_023_0xS3.xml
-repo sync -c -j8
-```
-
-同步后，你的整个仓库位于工作区的 `contest2026_023_0xS3/`，openvela 全量源码在外层（`nuttx/`、`apps/`、`packages/`、`vendor/` 等）。
-
----
-
-## 三、第二步：在哪里写代码
-
-**只在自己的仓目录 `contest2026_023_0xS3/` 里开发。** 不同作品形态放在对应子目录，manifest 会通过 `<linkfile>` 把它们**软链**到 openvela 编译树该在的位置——你不用手动 copy：
-
-| 作品形态 | 你的代码放这里             | 系统自动映射到                                 |
-| -------- | -------------------------- | ---------------------------------------------- |
-| 应用     | `app/hello_app/`           | `packages/demos/contest2026_023_hello_app`     |
-| 快应用   | `quickapp/hello_quickapp/` | `packages/apps/contest2026_023_hello_quickapp` |
-| 板级适配 | `board/contest_board/`     | `vendor/openvela/boards/contest2026_023_board` |
-
-> 用不到的形态目录可以删掉；新增作品时按同样规则加子目录，并在 `contest2026_023_0xS3.xml` 里补一条 `<linkfile>` 映射即可。**生产仓库（packages/nuttx/vendor 等）零改动。**
-
-建议仓库目录约定（便于评委定位）：
+## 系统架构
 
 ```text
-app/ | quickapp/ | board/   # 你的作品代码
-logs/                       # AI Coding 日志（主动导出后提交，格式见 logs/README.md）
-README.md                   # 作品说明（提交前请改成你自己的，见第六节）
+ESP32-S3-EYE / openvela
+  ├─ ai_agent + Markdown Skill
+  ├─ VelaOps Tool Provider
+  ├─ Incident / Approval / Repair 状态机
+  ├─ LCD + BOOT 按键
+  └─ HTTP + HMAC v1
+              │
+              ▼
+VelaOps Proxy（认证、防重放、Schema、白名单、审计）
+              │
+              ▼
+Linux 演示服务 / 端口 / 内存 / 磁盘
 ```
 
-> 仓内附带了一个 `.gitignore.example`，给出了**编译产物**等不需要进仓的文件示例。如需启用，`cp .gitignore.example .gitignore` 后按需增删即可。**注意 `logs/` 下最终导出的 AI Coding 日志必须提交，不要忽略。**
->
-> `logs/` 的目录结构与提交格式见 [logs/README.md](logs/README.md)。
+比赛 Demo 使用可信局域网 HTTP + HMAC。设备密钥、Wi-Fi 密码和 MiMo API Key 仅保存在本地私密配置中，不提交到 Git。
 
----
+## 赛道要求对应
 
-## 四、第三步：编译与运行
+| 要求 | 本项目实现 |
+| --- | --- |
+| openvela + ai_agent 真机运行 | ESP32-S3-EYE 完成联网、LLM、Tool 和 LCD 真机闭环 |
+| 至少一种交互 Channel | NSH/文件队列 Channel；主机 Debug GUI 提供联调入口 |
+| 自定义 Skill | `app/hello_app/skills/server-incident-response.md` |
+| 主动触发场景 | 后台资源巡检触发去抖后的异常/恢复事件 |
+| 工具执行场景 | 只读取证、LCD 弹窗、实体批准后的白名单服务修复 |
+| 队伍仓边界 | 作品代码、补丁、文档和日志均位于本队仓库 |
 
-编译/运行步骤随作品形态不同而不同，请参考你所在赛道的教程导航：
+## 目录结构
 
-- 快应用 / 手表应用：[快应用教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/quickapp/quickapp_guide_index.md)（含模拟器与开发板部署）。
-- AI 硬件产品创新：[AI 硬件赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_hardware/ai_hardware_guide_index.md)（环境搭建、编译烧录、Skill 开发）。
-- 新硬件适配：[新硬件适配赛道教程导航](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/hardware_porting/hardware_porting_guide_index.md)（BSP 移植、最小 NSH 基线）。
+```text
+app/hello_app/        设备端 VelaOps 应用、Tool Provider、LCD 与主机测试
+proxy/                HMAC Proxy、白名单 Action、审计与测试
+patches/              openvela 公共目录所需的可复现补丁
+docs/                 架构、协议、接手说明和唯一 Demo Runbook
+logs/                 官方采集器导出的 AI Coding JSONL 日志
+contest2026_023_0xS3.xml
+                      repo linkfile 映射
+```
 
-子目录已通过 manifest 中的 `<linkfile>` 软链进 openvela 编译树，因此构建在 openvela 工作区**根目录**（即你这个仓的上一级）进行。openvela 使用 `build.sh` 作为统一入口，接收一个 **board config 路径**作为参数：
+## 编译与烧录
+
+完整环境和故障恢复步骤以 `docs/DEMO_RUNBOOK.md` 为准。以下命令均在 openvela 工作区执行：
 
 ```bash
-# 进入 openvela 工作区根目录（你的仓的上一级）
-cd ..
+cd /home/lu/桌面/openvela
+bash contest2026_023_0xS3/docs/tools/apply_nuttx_patches.sh
 
-# 通用语法：第一个参数是 board config 路径，第二个参数可以是 menuconfig / distclean 等
-./build.sh <board-config-path> [menuconfig|distclean] [-j8]
+export PATH="$PWD/prebuilts/gcc/linux-x86_64/xtensa-esp32s3-elf/bin:$PATH"
+export PATH="$PWD/.buildlog/esptool-venv/bin:$PATH"
+export CCACHE_DISABLE=1
+
+./build.sh vendor/espressif/boards/esp32s3/esp32s3-eye/configs/openvela
+
+esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 \
+  --before default-reset --after hard-reset \
+  write-flash 0x0 nuttx/nuttx.bin
 ```
 
-> 具体的 board config 路径、目标产物、模拟器/真机部署方式请以你所在赛道的教程导航为准。本仓 `app/` `quickapp/` `board/` 三个示例骨架对应的 Kconfig 选项可通过 `menuconfig` 启用。
+## Demo 启动
 
----
+1. 在队伍目录准备本地私密环境文件 `.velaops.local.env`，不要提交该文件。
+2. 使用 `docs/tools/prepare_live_demo.py` 生成配对的 Proxy/设备临时配置。
+3. 启动演示目标、局域网 NTP、VelaOps Proxy 和限制客户端 IP 的 MiMo 转发器。
+4. 复位开发板，连接 Wi-Fi，创建 `/data/velaops` 并下发设备配置。
+5. 执行 `docs/tools/provision_ai_agent_assets.sh` 安装 Skill/Provider 资产。
+6. 启动 `docs/tools/debug_event_gui.py`，触发资源巡检或 LCD Debug 事件。
 
-## 五、第四步：提交作品
+受限 MiMo 转发器示例：
 
-1. **fork** 你的专属仓 → 开发 → `git commit` 并推送 → 向专属仓发起 **Pull Request**，可**自行 review 并合入**（无需等组委会）。
-2. **AI Coding 日志**：与 AI 工具的对话会自动记录到本机 staging（不会自动上传），需你**主动导出/打包**选定会话到仓内 `logs/` 目录后一并提交。详见[《AI Coding 日志归集与提交手册》](https://github.com/open-vela/docs/blob/dev-ai-contest-2026/zh-cn/contest_2026/ai_coding_log_guide.md)。
-3. 若需改动 **nuttx 等公共仓库**，不在本仓改，而是 fork 对应公共仓、以 PR 提交到 `dev-ai-contest-2026` 分支，由组委会 review 后合入。
-
-> ⏰ **提交作品截止：9 月 20 日**。截止后统一收回 push 权限，仍可查看 / clone。
->
-> 获奖后再按要求将作品 PR 至 openvela 上游对应仓库（走标准 PR + CI 流程）。
-
-### 关于 PR 与 CLA
-
-- 本仓所有改动通过 **Pull Request** 合入（分支保护强制，可自行合入自己的 PR）。
-- 首次贡献需在[**官网签署 CLA**](https://openvela.com/#/community/cla)；PR 上会自动跑 `cla/signature` 检查，在官网签署成功后，在 PR 评论 `/check-cla` 复检即可通过。
-
----
-
-## 六、提交前：把本 README 改成你的作品说明
-
-本文件目前是组委会给的**使用说明书**。**作品提交前，请把它替换成你自己作品的说明**，方便评委快速了解你做了什么、怎么跑起来。建议至少包含以下内容：
-
-```markdown
-# <你的作品名>
-
-## 一、作品简介
-<一句话/一段话说明这个作品是什么、解决什么问题、亮点在哪>
-
-## 二、选题方向
-<快应用 / 手表应用创新 ｜ AI 硬件产品创新 ｜ 新硬件适配 ｜ 自定方向，并简述理由>
-
-## 三、目录结构
-<列出你这个仓里各目录/文件的作用，例如：>
-- `app/xxx/`        — <说明>
-- `board/xxx/`      — <说明>
-- `quickapp/xxx/`   — <说明>
-- `logs/`           — AI Coding 日志
-- `docs/` 或其他    — <说明>
-
-## 四、运行方式
-<拉取工程后，如何编译、烧录/部署、运行的完整步骤；最好能让评委照着一步步复现>
-
-## 五、AI Coding 使用说明
-<说明本作品如何借助 AI 辅助开发：
-- 在需求拆解 / 方案设计 / 编码 / 调试 / 文档等环节如何与 AI 协作；
-- AI 对开发效率或质量带来的实际帮助。
-完整对话日志见 logs/ 目录>
+```bash
+set -a; source ./.velaops.local.env; set +a
+BIND_HOST=<DEV_HOST_IP> ALLOWED_CLIENT=<BOARD_IP> \
+  python3 docs/tools/llm_forwarder.py 28792
 ```
 
-> 提示：将会根据「作品本身 + 你的 README 说明 + `logs/` 里的 AI Coding 日志」来理解和评估你的作品，README 写清楚很重要。
+Debug GUI 的 `TEST-OK` 请求会经过：
 
----
+```text
+GUI → ask 队列 → ai_agent → MiMo → velaops_show_message → LCD
+```
 
-## 附：仓库命名规范
+## 测试
 
-`contest2026_<编号>_<队伍名>` — 编号三位零填充；队名 slug（全小写、英文/拼音、连字符）。例：`contest2026_023_0xS3`。
-（仓库由组委会统一创建，**每队仅一个仓**，无需自行命名。）
+```bash
+make -C proxy check
+make -C app/hello_app/tests check
+python3 -m py_compile docs/tools/debug_event_gui.py docs/tools/llm_forwarder.py
+```
+
+设备端网络、HMAC、资源看板、主动事件、BOOT 批准修复和 MiMo 工具调用均已完成真机验证。详细证据和已知限制见：
+
+- `docs/DEMO_RUNBOOK.md`
+- `docs/handover.md`
+- `docs/AI_AGENT_TRACK_CHECKLIST.md`
+- `docs/PROTOCOL_V1.md`
+
+## AI Coding 使用说明
+
+本项目在需求拆解、架构设计、HMAC 协议、状态机、Proxy 测试、ESP32-S3 真机调试、Wi-Fi 稳定性和文档整理中使用 AI Coding 工具辅助开发。所有提交日志均由组委会提供的采集器导出并通过官方 `validate-log.py` 校验。
+
+可提交的 AI Coding 对话记录位于 `logs/hanbingniao/`。当前桌面 Codex 会话未被比赛采集器导出，因此未伪造或手工补写相关日志。
+
+## 安全边界
+
+- LLM 不能传入主机、shell、服务名或任意 Action。
+- Proxy 仅执行编译期/配置期白名单 Action。
+- HMAC 签名覆盖方法、路径、时间、nonce 和请求体摘要。
+- 可变更操作需要实体按键批准，并具有超时和防重放约束。
+- 日志、仓库和示例配置不得包含密码、Token、API Key 或设备 HMAC 密钥。
