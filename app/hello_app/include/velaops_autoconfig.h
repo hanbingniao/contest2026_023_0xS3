@@ -11,6 +11,7 @@
 #define VELAOPS_CRED_WIFI_PASSWORD_CAPACITY 64
 #define VELAOPS_CRED_API_KEY_CAPACITY 96
 #define VELAOPS_CRED_DEMO_HOST_CAPACITY 48
+#define VELAOPS_CRED_SECRET_CAPACITY 129
 
 /* TF 卡凭据文件：KEY=VALUE 文本，'#' 开头为注释，允许空行与行尾空白。 */
 typedef struct
@@ -20,8 +21,10 @@ typedef struct
   char api_key[VELAOPS_CRED_API_KEY_CAPACITY];
   char demo_host[VELAOPS_CRED_DEMO_HOST_CAPACITY];
   char demo_port[8];
+  char device_secret[VELAOPS_CRED_SECRET_CAPACITY];
   int has_api_key;
   int has_demo_host;
+  int has_device_secret;
 } velaops_credentials_t;
 
 /* 解析凭据文件内容（主机侧单测与设备侧共用）。返回 0 表示至少包含
