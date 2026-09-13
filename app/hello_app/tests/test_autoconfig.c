@@ -30,7 +30,8 @@ static void test_full_credentials(void)
       "WIFI_PASSWORD=secret pass 123\n"
       "MIMO_API_KEY=sk-test-key-42\n"
       "DEMO_HOST=192.168.31.139\n"
-      "DEMO_PORT=28790\n";
+      "DEMO_PORT=28790\n"
+      "DEVICE_SECRET=0123456789abcdef0123456789abcdef\n";
 
   EXPECT(velaops_autoconfig_parse_credentials(content, &cred) == 0);
   EXPECT(strcmp(cred.wifi_ssid, "TP-GM2.4") == 0);
@@ -40,6 +41,9 @@ static void test_full_credentials(void)
   EXPECT(cred.has_demo_host == 1);
   EXPECT(strcmp(cred.demo_host, "192.168.31.139") == 0);
   EXPECT(strcmp(cred.demo_port, "28790") == 0);
+  EXPECT(cred.has_device_secret == 1);
+  EXPECT(strcmp(cred.device_secret,
+                "0123456789abcdef0123456789abcdef") == 0);
 }
 
 static void test_trim_and_crlf(void)
