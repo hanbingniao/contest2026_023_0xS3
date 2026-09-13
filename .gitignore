@@ -1,18 +1,27 @@
-# Build artifacts
-build/
-out/
-*.o
-*.a
-*.elf
-*.hex
-*.map
-.built
-.depend
-Make.dep
+# 本地编辑器与 Python 缓存
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+.venv/
+.pytest_cache/
 
-# Local handoff and working-memory documents
-handoff/
-PROJECT_MEMORY.md
-PROJECT_OVERVIEW.md
-PRODUCT_REQUIREMENTS_DRAFT.md
-USER_GUIDE.md
+# 本地构建和临时文件；AI Coding 日志不得忽略
+build/
+dist/
+*.tmp
+*.bak
+*.swp
+.velaops.local.env
+
+# NuttX 通过应用软链接构建时生成在队伍仓内的中间文件
+app/hello_app/.built
+app/hello_app/.depend
+app/hello_app/Make.dep
+
+# 主机侧单测二进制（make 生成）
+app/hello_app/tests/test_*
+!app/hello_app/tests/test_*.c
+!app/hello_app/tests/test_*.py
+app/hello_app/*.o
+app/hello_app/**/*.o

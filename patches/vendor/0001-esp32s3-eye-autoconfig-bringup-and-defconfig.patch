@@ -1,0 +1,216 @@
+diff --git a/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig b/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig
+index 4338be7..e775e00 100644
+--- a/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig
++++ b/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig
+@@ -5,8 +5,13 @@
+ # You can then do "make savedefconfig" to generate a new defconfig file that includes your
+ # modifications.
+ #
++# CONFIG_AI_AGENT_FEISHU is not set
++# CONFIG_AI_AGENT_MQTT is not set
++# CONFIG_AI_AGENT_NODE is not set
++# CONFIG_AI_AGENT_WEIXIN is not set
+ # CONFIG_ARCH_LEDS is not set
+ # CONFIG_ESP32S3_I2S0_TX is not set
++# CONFIG_ESP32S3_SDMMC_DMA is not set
+ # CONFIG_NSH_ARGCAT is not set
+ # CONFIG_NSH_CMDOPT_HEXDUMP is not set
+ CONFIG_ALLOW_BSD_COMPONENTS=y
+@@ -24,23 +29,19 @@ CONFIG_ARCH_STACKDUMP=y
+ CONFIG_ARCH_XTENSA=y
+ CONFIG_AUDIO=y
+ CONFIG_AUDIO_I2S=y
+-CONFIG_BLUETOOTH_CNTRL_HOST_FLOW_DISABLE=y
+ CONFIG_BOARD_CUSTOM_BUTTONS=y
+ CONFIG_BOARD_CUSTOM_IRQBUTTONS=y
+ CONFIG_BOARD_CUSTOM_LEDS=y
+ CONFIG_BOARD_LOOPSPERMSEC=16717
+-CONFIG_BTSAK=y
+ CONFIG_BUILTIN=y
++CONFIG_CRYPTO_MBEDTLS=y
+ CONFIG_DEBUG_FULLOPT=y
+ CONFIG_DEBUG_SYMBOLS=y
+ CONFIG_DEFAULT_TASK_STACKSIZE=4096
+ CONFIG_DRIVERS_AUDIO=y
+-CONFIG_DRIVERS_BLUETOOTH=y
+ CONFIG_DRIVERS_IEEE80211=y
+ CONFIG_DRIVERS_WIRELESS=y
+-CONFIG_ESP32S3_BLE=y
+ CONFIG_ESP32S3_CAM=y
+-CONFIG_ESP32S3_EYE_LCD=y
+ CONFIG_ESP32S3_I2C0=y
+ CONFIG_ESP32S3_I2C0_SCLPIN=5
+ CONFIG_ESP32S3_I2C0_SDAPIN=4
+@@ -52,11 +53,9 @@ CONFIG_ESP32S3_I2S=y
+ CONFIG_ESP32S3_LEDC=y
+ CONFIG_ESP32S3_LEDC_TIM0=y
+ CONFIG_ESP32S3_LEDC_TIM0_CHANNELS=1
+-CONFIG_ESP32S3_POWER_SAVE_NONE=y
+ CONFIG_ESP32S3_RT_TIMER_TASK_STACK_SIZE=4096
+ CONFIG_ESP32S3_SDMMC=y
+ CONFIG_ESP32S3_SDMMC_CMD=38
+-CONFIG_ESP32S3_SPI2=y
+ CONFIG_ESP32S3_SPI2_CLKPIN=21
+ CONFIG_ESP32S3_SPI2_CSPIN=44
+ CONFIG_ESP32S3_SPI2_MISOPIN=1
+@@ -65,6 +64,7 @@ CONFIG_ESP32S3_SPIRAM=y
+ CONFIG_ESP32S3_SPIRAM_MODE_OCT=y
+ CONFIG_ESP32S3_USBSERIAL=y
+ CONFIG_ESP32S3_WIFI=y
++CONFIG_EXAMPLES_AI_AGENT_VELA=y
+ CONFIG_EXAMPLES_BUTTONS=y
+ CONFIG_EXAMPLES_CAMERA=y
+ CONFIG_EXAMPLES_HELLO=y
+@@ -75,6 +75,7 @@ CONFIG_FAT_LCNAMES=y
+ CONFIG_FAT_LFN=y
+ CONFIG_FS_FAT=y
+ CONFIG_FS_PROCFS=y
++CONFIG_FS_TMPFS=y
+ CONFIG_GRAPHICS_LVGL=y
+ CONFIG_HAVE_CXXINITIALIZE=y
+ CONFIG_IDLETHREAD_STACKSIZE=3072
+@@ -86,11 +87,7 @@ CONFIG_INPUT_BUTTONS_LOWER=y
+ CONFIG_INTELHEX_BINARY=y
+ CONFIG_IOB_NBUFFERS=124
+ CONFIG_IOB_THROTTLE=24
+-CONFIG_LCD=y
+-CONFIG_LCD_DEV=y
+-CONFIG_LCD_FRAMEBUFFER=y
+ CONFIG_LCD_RPORTRAIT=y
+-CONFIG_LCD_ST7789=y
+ CONFIG_LCD_ST7789_FREQUENCY=40000000
+ CONFIG_LCD_ST7789_YOFFSET=80
+ CONFIG_LCD_ST7789_YRES=240
+@@ -114,7 +111,7 @@ CONFIG_NETDB_BUFSIZE=512
+ CONFIG_NETDB_DNSCLIENT=y
+ CONFIG_NETDB_DNSCLIENT_RECV_TIMEOUT=2
+ CONFIG_NETDB_DNSCLIENT_RETRIES=8
+-CONFIG_NETDB_DNSSERVER_NOADDR=y
++CONFIG_NETDB_DNSSERVER_IPv4ADDR=0x72727272
+ CONFIG_NETDEV_LATEINIT=y
+ CONFIG_NETDEV_PHY_IOCTL=y
+ CONFIG_NETDEV_STATISTICS=y
+@@ -126,10 +123,12 @@ CONFIG_NETUTILS_CJSON=y
+ CONFIG_NETUTILS_DHCPC_RECV_TIMEOUT_MS=200
+ CONFIG_NETUTILS_DHCPC_RETRIES=20
+ CONFIG_NETUTILS_IPERF=y
++CONFIG_NETUTILS_NTPCLIENT=y
++CONFIG_NETUTILS_NTPCLIENT_PORTNO=40123
++CONFIG_NETUTILS_NTPCLIENT_SERVER="192.168.71.90"
+ CONFIG_NET_ALLOC_DEVIF_CALLBACKS=1
+ CONFIG_NET_ARPTAB_SIZE=48
+ CONFIG_NET_ARP_IPIN=y
+-CONFIG_NET_BLUETOOTH=y
+ CONFIG_NET_BROADCAST=y
+ CONFIG_NET_ETH_PKTSIZE=1514
+ CONFIG_NET_GUARDSIZE=4
+@@ -142,6 +141,7 @@ CONFIG_NET_LOCAL_SCM=y
+ CONFIG_NET_LOOPBACK=y
+ CONFIG_NET_NETLINK=y
+ CONFIG_NET_PKT=y
++CONFIG_NET_RECV_BUFSIZE=16384
+ CONFIG_NET_SEND_BUFSIZE=16384
+ CONFIG_NET_STATISTICS=y
+ CONFIG_NET_TCP=y
+@@ -170,14 +170,10 @@ CONFIG_RAM_SIZE=114688
+ CONFIG_RAM_START=0x20000000
+ CONFIG_RR_INTERVAL=200
+ CONFIG_SCHED_HPWORKSTACKSIZE=2048
+-CONFIG_SCHED_WAITPID=y
+ CONFIG_SDIO_WIDTH_D1_ONLY=y
+ CONFIG_SENSORS=y
+ CONFIG_SENSORS_QMA7981=y
+ CONFIG_SIG_DEFAULT=y
+-CONFIG_SMP=y
+-CONFIG_SMP_NCPUS=2
+-CONFIG_SPI_CMDDATA=y
+ CONFIG_START_DAY=6
+ CONFIG_START_MONTH=12
+ CONFIG_START_YEAR=2011
+@@ -188,6 +184,8 @@ CONFIG_SYSTEM_I2CTOOL=y
+ CONFIG_SYSTEM_NSH=y
+ CONFIG_SYSTEM_PING=y
+ CONFIG_SYSTEM_PING_STACKSIZE=3072
++CONFIG_SYSTEM_POPEN=y
++CONFIG_SYSTEM_SYSTEM=y
+ CONFIG_SYSTEM_TCPDUMP=y
+ CONFIG_TESTING_GETPRIME=y
+ CONFIG_TESTING_GETPRIME_PRIORITY=100
+@@ -203,7 +201,6 @@ CONFIG_UTILS_IPERF2=y
+ CONFIG_VIDEO=y
+ CONFIG_VIDEO_STREAM=y
+ CONFIG_WIRELESS=y
+-CONFIG_WIRELESS_BLUETOOTH=y
+ CONFIG_WIRELESS_WAPI=y
+ CONFIG_WIRELESS_WAPI_CMDTOOL=y
+ CONFIG_WIRELESS_WAPI_INITCONF=y
+diff --git a/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c b/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c
+index 1fb0404..278bc79 100644
+--- a/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c
++++ b/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c
+@@ -38,6 +38,7 @@
+ #include <stdio.h>
+ 
+ #include <errno.h>
++#include <spawn.h>
+ #include <nuttx/fs/fs.h>
+ 
+ #ifdef CONFIG_ESP32S3_TIMER
+@@ -145,6 +146,13 @@ int esp32s3_bringup(void)
+       syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at %s: %d\n",
+              CONFIG_LIBC_TMPDIR, ret);
+     }
++
++  /* 为 VelaOps 私密配置提供独立的运行时文件系统。 */
++  ret = nx_mount(NULL, "/data", "tmpfs", 0, NULL);
++  if (ret < 0)
++    {
++      syslog(LOG_ERR, "ERROR: Failed to mount tmpfs at /data: %d\n", ret);
++    }
+ #endif
+ 
+ #ifdef CONFIG_ESP32S3_TIMER
+@@ -282,6 +290,43 @@ int esp32s3_bringup(void)
+     {
+       syslog(LOG_ERR, "ERROR: Failed to initialize SDMMC: %d\n", ret);
+     }
++
++  /* VelaOps 参赛项目：上电拉起 TF 卡凭据自动配置（幂等；失败只打印，
++   * 不影响 NSH 手动配置流程）。
++   * 注意 1：CONFIG_LIBC_EXECFUNCS 未开启，按名查找不可用，直传 builtin 入口。
++   * 注意 2：task_setup 会把任务名自动放进 argv[0]，这里只传子命令。
++   * 注意 3：task_spawn 直传入口只用 CONFIG_POSIX_SPAWN_DEFAULT_STACKSIZE
++   * (2KB) 小栈，会栈溢出破坏堆（实测拖死 wifi 内核线程），必须走队伍仓的
++   * 显式指定栈启动入口。 */
++  {
++    extern int velaops_main(int argc, char *argv[]);
++    extern int velaops_spawn_with_stack(int (*entry)(int, char **),
++                                        const char *name, char *const argv[],
++                                        size_t stacksize);
++
++    static char *const velaops_autoconfig_argv[] =
++    {
++      "autoconfig", NULL
++    };
++
++    int velaops_spawn_pid;
++
++    syslog(LOG_INFO, "velaops: bringup spawning autoconfig\n");
++    velaops_spawn_pid = velaops_spawn_with_stack(velaops_main, "velaops",
++                                                 velaops_autoconfig_argv,
++                                                 32768);
++    if (velaops_spawn_pid < 0)
++      {
++        syslog(LOG_WARNING,
++               "velaops autoconfig spawn failed (%d), fallback to manual "
++               "setup\n", velaops_spawn_pid);
++      }
++    else
++      {
++        syslog(LOG_INFO, "velaops: autoconfig spawned pid=%d\n",
++               velaops_spawn_pid);
++      }
++  }
+ #endif
+ 
+ #ifdef CONFIG_ESP32S3_CAM

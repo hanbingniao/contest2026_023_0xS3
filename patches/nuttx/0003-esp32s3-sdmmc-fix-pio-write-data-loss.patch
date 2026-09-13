@@ -1,0 +1,94 @@
+diff --git a/arch/xtensa/src/esp32s3/esp32s3_sdmmc.c b/arch/xtensa/src/esp32s3/esp32s3_sdmmc.c
+index d76eba5818c..9f72a89d2f3 100644
+--- a/arch/xtensa/src/esp32s3/esp32s3_sdmmc.c
++++ b/arch/xtensa/src/esp32s3/esp32s3_sdmmc.c
+@@ -1811,9 +1811,7 @@ static int esp32s3_recvsetup(struct sdio_dev_s *dev, uint8_t *buffer,
+                              size_t nbytes)
+ {
+   struct esp32s3_dev_s *priv = (struct esp32s3_dev_s *)dev;
+-#ifdef CONFIG_ESP32S3_SDMMC_DMA
+   uint32_t regval;
+-#endif
+ 
+   mcinfo("nbytes=%ld\n", (long) nbytes);
+ 
+@@ -1834,6 +1832,18 @@ static int esp32s3_recvsetup(struct sdio_dev_s *dev, uint8_t *buffer,
+ 
+   esp32s3_putreg(SDMMC_FIFOTH_RXWMARK(1), ESP32S3_SDMMC_FIFOTH);
+ 
++  /* Reset the FIFOs: an interrupted/aborted read (e.g. a failed FAT mount
++   * parse) can leave residue words in the RX FIFO, and without a reset the
++   * next read drains them first, shifting every following sector's data.
++   */
++
++  regval  = esp32s3_getreg(ESP32S3_SDMMC_CTRL);
++  regval |= SDMMC_CTRL_FIFORESET;
++  esp32s3_putreg(regval, ESP32S3_SDMMC_CTRL);
++  while ((esp32s3_getreg(ESP32S3_SDMMC_CTRL) & SDMMC_CTRL_FIFORESET) != 0)
++    {
++    }
++
+ #ifdef CONFIG_ESP32S3_SDMMC_DMA
+   /* Make sure that internal DMA is disabled */
+ 
+@@ -1877,9 +1887,7 @@ static int esp32s3_sendsetup(struct sdio_dev_s *dev, const uint8_t *buffer,
+                              size_t nbytes)
+ {
+   struct esp32s3_dev_s *priv = (struct esp32s3_dev_s *)dev;
+-#ifdef CONFIG_ESP32S3_SDMMC_DMA
+   uint32_t regval;
+-#endif
+ 
+   mcinfo("nbytes=%ld\n", (long)nbytes);
+ 
+@@ -1892,13 +1900,47 @@ static int esp32s3_sendsetup(struct sdio_dev_s *dev, const uint8_t *buffer,
+   priv->remaining = nbytes;
+   priv->wrdir     = true;
+ 
+-  /* Configure the FIFO so that we will receive the TXDR interrupt whenever
+-   * there the TX FIFO is at least half empty.
++  /* Configure the FIFO so that we will receive the TXDR interrupt as soon
++   * as any room appears in the TX FIFO (watermark = depth - 1).
++   *
++   * NOTE: with the original half-depth watermark a 512B write reproducibly
++   * delivered only 508 bytes: the last refill of the interrupt-driven loop
++   * got lost and the final word stayed in the TX FIFO, corrupting the next
++   * write. A watermark of zero instead keeps TXDR level-asserted while the
++   * FIFO is empty and spins the ISR forever once remaining == 0. Use a
++   * near-full watermark so every refill is triggered well before starvation,
++   * and pre-fill the FIFO synchronously below so the first burst never
++   * depends on interrupt latency.
+    */
+ 
+-  esp32s3_putreg(SDMMC_FIFOTH_TXWMARK(ESP32S3_TXFIFO_DEPTH / 2),
++  esp32s3_putreg(SDMMC_FIFOTH_TXWMARK(ESP32S3_TXFIFO_DEPTH - 1),
+                  ESP32S3_SDMMC_FIFOTH);
+ 
++  /* Reset the TX FIFO first: a previous write can leave residue words in
++   * the FIFO (its BYTCNT accounting stopped short), and without a reset
++   * the residue corrupts the next transfer or makes FIFOFULL assert before
++   * all of our data is loaded.
++   */
++
++  regval  = esp32s3_getreg(ESP32S3_SDMMC_CTRL);
++  regval |= SDMMC_CTRL_FIFORESET;
++  esp32s3_putreg(regval, ESP32S3_SDMMC_CTRL);
++  while ((esp32s3_getreg(ESP32S3_SDMMC_CTRL) & SDMMC_CTRL_FIFORESET) != 0)
++    {
++    }
++
++  /* Pre-fill the empty TX FIFO synchronously. The command has not been
++   * issued yet, so the card consumes nothing until after this returns.
++   */
++
++  while ((esp32s3_getreg(ESP32S3_SDMMC_STATUS) & SDMMC_STATUS_FIFOFULL) == 0
++         && priv->remaining > 0)
++    {
++      esp32s3_putreg(*priv->buffer, ESP32S3_SDMMC_DATA);
++      priv->buffer++;
++      priv->remaining -= 4;
++    }
++
+ #ifdef CONFIG_ESP32S3_SDMMC_DMA
+   /* Make sure that internal DMA is disabled */
+ 

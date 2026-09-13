@@ -1,0 +1,28 @@
+diff --git a/drivers/lcd/st7789.c b/drivers/lcd/st7789.c
+index e8f6c3ea6a7..e145ebccc40 100644
+--- a/drivers/lcd/st7789.c
++++ b/drivers/lcd/st7789.c
+@@ -505,7 +505,7 @@ static void st7789_ramctl(FAR struct st7789_dev_s *dev)
+   uint16_t ramctl = 0x0;
+
+   st7789_sendcmd(dev, ST7789_RAMCTRL);
+-  st7789_select(dev->spi, LCD_ST7789_SPI_BITS * 2);
++  st7789_select(dev->spi, LCD_ST7789_SPI_BITS);
+
+   /* Fill the reserved bits */
+
+@@ -521,6 +521,13 @@ static void st7789_ramctl(FAR struct st7789_dev_s *dev)
+   ramctl |= 0x800;
+ #endif
+
+-  SPI_SEND(dev->spi, LCD_ST7789_DATA_PREFIX | ramctl);
++  /* RAMCTRL has two ordered parameter bytes.  Sending ramctl as one
++   * 16-bit SPI word reverses them on ESP32-S3 and makes the controller
++   * interpret RGB565 data with the wrong byte order.  Keep the byte order
++   * explicit: first 00, then F0 (or F8 for little-endian RGB data).
++   */
++
++  SPI_SEND(dev->spi, LCD_ST7789_DATA_PREFIX | (ramctl & 0xff));
++  SPI_SEND(dev->spi, LCD_ST7789_DATA_PREFIX | (ramctl >> 8));
+   st7789_deselect(dev->spi);
+ }

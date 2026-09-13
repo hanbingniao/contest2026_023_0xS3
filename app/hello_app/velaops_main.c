@@ -1,461 +1,1021 @@
+/****************************************************************************
+ * Contest 2026 team 023 - VelaOps 设备端入口。
+ ****************************************************************************/
+
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <termios.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <sys/random.h>
+#include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
-#include "velaops.h"
+#include <netutils/ntpclient.h>
+#include <nuttx/input/buttons.h>
+#include <fsutils/mkfatfs.h>
+#include "velaops_agent_monitor.h"
+#include "velaops_agent_tools.h"
+#include "velaops_autoconfig.h"
+#include "velaops_button_approval.h"
+#include "velaops_device_config.h"
+#include "velaops_display.h"
+#include "velaops_health.h"
+#include "velaops_guarded_repair.h"
+#include "velaops_local_diagnosis.h"
+#include "velaops_memory_result.h"
+#include "velaops_proxy_client.h"
+#include "velaops_proxy_http_transport.h"
+#include "velaops_resource_incident.h"
 
-static int run_dashboard_demo(void)
+#define VELAOPS_AUTH_TARGET "/v1/auth/check"
+#define VELAOPS_ACTION_TARGET "/v1/actions/execute"
+#define VELAOPS_AUTH_BODY "{}"
+#define VELAOPS_CHECK_MEMORY_BODY \
+  "{\"schema_version\":1,\"action\":\"check_memory\"," \
+  "\"target\":\"local-dev\",\"parameters\":{}}"
+#define VELAOPS_CHECK_RESOURCES_BODY \
+  "{\"schema_version\":1,\"action\":\"check_resources\"," \
+  "\"target\":\"local-dev\",\"parameters\":{}}"
+#define VELAOPS_MIN_VALID_TIME 1704067200
+#define VELAOPS_TIME_SYNC_ATTEMPTS 3
+#define VELAOPS_TIME_SYNC_ATTEMPT_SECONDS 20
+#define VELAOPS_MEMORY_UNHEALTHY_PERCENT 80.0
+#define VELAOPS_BUTTON_DEVICE "/dev/buttons"
+#define VELAOPS_MONITOR_INTERVAL_SECONDS 5
+#define VELAOPS_MONITOR_REPAIR_AFTER_FAILURES 2
+#define VELAOPS_MONITOR_CREDENTIAL_PATH "/mnt/sd/velaops-credentials.txt"
+#define VELAOPS_HTTP_TIMEOUT_SECONDS 5
+#define VELAOPS_RESOURCE_RESULT_CAPACITY 2048
+#define VELAOPS_LOCAL_DIAGNOSIS_CAPACITY 1024
+#define VELAOPS_INCIDENT_FAILURE_THRESHOLD 2
+#define VELAOPS_INCIDENT_RECOVERY_THRESHOLD 2
+#define VELAOPS_APPROVAL_HOLD_MS 2000
+#define VELAOPS_APPROVAL_TIMEOUT_MS 30000
+#define VELAOPS_APPROVAL_VALIDITY_SECONDS 60
+#define VELAOPS_REPAIR_REQUEST_CAPACITY 512
+#define VELAOPS_REPAIR_RESULT_CAPACITY 320
+#define VELAOPS_REPAIR_VERIFY_ATTEMPTS 5
+
+static int velaops_set_demo_time(const char *value)
 {
-  struct velaops_profile profile;
-  struct velaops_metrics metrics;
-  unsigned int tick = 0;
+  struct timespec requested;
+  char *end;
+  long long seconds;
 
-  memset(&profile, 0, sizeof(profile));
-  memset(&metrics, 0, sizeof(metrics));
-  snprintf(profile.host, sizeof(profile.host), "DEMO-SERVER");
-  snprintf(profile.user, sizeof(profile.user), "VELAOPS");
-  profile.port = 22;
-  metrics.valid = true;
-  metrics.cpu_percent = 38;
-  metrics.memory_percent = 62;
-  metrics.memory_total_kb = 8 * 1024 * 1024;
-  metrics.memory_available_kb = 3 * 1024 * 1024;
-  metrics.disk_percent = 47;
-  metrics.load_1min = 0.8f;
-  metrics.load_5min = 0.6f;
-  metrics.load_15min = 0.4f;
-  metrics.process_count = 136;
-  metrics.uptime_seconds = 7260;
-  metrics.net_rx_bytes = 42 * 1024 * 1024;
-  metrics.net_tx_bytes = 18 * 1024 * 1024;
-
-  if (velaops_dashboard_open() < 0)
+  errno = 0;
+  seconds = strtoll(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' ||
+      seconds < VELAOPS_MIN_VALID_TIME)
     {
-      puts("Dashboard demo: /dev/fb0 unavailable.");
-      return 1;
+      fprintf(stderr, "velaops: Unix 时间参数无效\n");
+      return EXIT_FAILURE;
     }
 
-  velaops_state_init();
-  velaops_input_init();
-  velaops_led_init();
-  puts("Dashboard demo running. BOOT short press changes page; Ctrl-C stops.");
-  for (;;)
+  requested.tv_sec = (time_t)seconds;
+  requested.tv_nsec = 0;
+  if ((long long)requested.tv_sec != seconds ||
+      clock_settime(CLOCK_REALTIME, &requested) != 0)
     {
-      const char *status = tick % 20 >= 15 ? "ALERT CPU HIGH" : "MONITORING OK";
-      metrics.cpu_percent = 30 + tick % 61;
-      velaops_dashboard_draw(&profile, &metrics, status);
-      velaops_led_update();
-      usleep(250000);
-      tick++;
+      fprintf(stderr, "velaops: 设置系统时间失败\n");
+      return EXIT_FAILURE;
     }
+
+  printf("velaops: 已设置演示时间\n");
+  return EXIT_SUCCESS;
 }
 
-static int confirm_fingerprint(const char *fingerprint)
+static int velaops_ensure_time(void)
 {
-  char answer[8];
-  struct termios oldt;
-  struct termios newt;
+  int attempt;
+  int waited;
 
-  printf("Server public-key fingerprint:\n  %s\n", fingerprint);
-  printf("Trust this server? Type yes: ");
-  fflush(stdout);
-
-  /* 确保 stdin 在规范模式 */
-  if (tcgetattr(0, &oldt) == 0)
+  if (time(NULL) >= VELAOPS_MIN_VALID_TIME)
     {
-      newt = oldt;
-      newt.c_lflag |= ICANON | ECHO;
-      tcsetattr(0, TCSANOW, &newt);
+      return 0;
     }
+  /* 该版本 NTP daemon 在一次重试组耗尽后会自行退出。ESP32-S3 首个
+   * UDP 包又可能因 ARP 尚未建立而丢失，因此由应用有界重启 daemon，
+   * 不能只延长对同一个已退出任务的等待时间。
+   */
 
-  if (fgets(answer, sizeof(answer), stdin) == NULL)
+  for (attempt = 0; attempt < VELAOPS_TIME_SYNC_ATTEMPTS; attempt++)
     {
-      tcsetattr(0, TCSANOW, &oldt);
+      printf("velaops: 正在同步系统时间 (%d/%d)\n", attempt + 1,
+             VELAOPS_TIME_SYNC_ATTEMPTS);
+      if (ntpc_start() < 0)
+        {
+          continue;
+        }
+      for (waited = 0; waited < VELAOPS_TIME_SYNC_ATTEMPT_SECONDS; waited++)
+        {
+          if (time(NULL) >= VELAOPS_MIN_VALID_TIME)
+            {
+              return 0;
+            }
+          sleep(1);
+        }
+    }
+  return time(NULL) >= VELAOPS_MIN_VALID_TIME ? 0 : -1;
+}
+
+static void velaops_hex_encode(const uint8_t *input, size_t input_len,
+                               char *output)
+{
+  static const char digits[] = "0123456789abcdef";
+  size_t index;
+
+  for (index = 0; index < input_len; index++)
+    {
+      output[index * 2] = digits[input[index] >> 4];
+      output[index * 2 + 1] = digits[input[index] & 0x0f];
+    }
+  output[input_len * 2] = '\0';
+}
+
+static int velaops_make_metadata(const char *device_id,
+                                 velaops_auth_metadata_t *metadata,
+                                 char request_id[33], char nonce[33])
+{
+  uint8_t random_bytes[32];
+  time_t now;
+
+  if (velaops_ensure_time() != 0)
+    {
+      return -1;
+    }
+  now = time(NULL);
+  /* 当前板级配置只启用了硬件 TRNG 对应的 /dev/random。显式请求该
+   * 安全随机源，避免 getrandom() 默认访问未启用的 /dev/urandom。
+   */
+
+  if (getrandom(random_bytes, sizeof(random_bytes), GRND_RANDOM) !=
+      sizeof(random_bytes))
+    {
+      return -2;
+    }
+  velaops_hex_encode(random_bytes, 16, request_id);
+  velaops_hex_encode(random_bytes + 16, 16, nonce);
+  metadata->version = VELAOPS_PROTOCOL_VERSION;
+  metadata->device_id = device_id;
+  metadata->request_id = request_id;
+  metadata->timestamp = (int64_t)now;
+  metadata->nonce = nonce;
+  return 0;
+}
+
+static int velaops_get_memory_health(const char *result_json,
+                                     const char **health)
+{
+  velaops_memory_observation_t observation;
+  velaops_health_snapshot_t snapshot;
+
+  if (velaops_memory_result_parse(result_json, &observation) !=
+      VELAOPS_MEMORY_RESULT_OK ||
+      velaops_evaluate_memory(&observation,
+                              VELAOPS_MEMORY_UNHEALTHY_PERCENT,
+                              (int64_t)time(NULL), &snapshot) !=
+      VELAOPS_HEALTH_OK)
+    {
+      fprintf(stderr, "velaops: Proxy 内存快照不可信\n");
       return -1;
     }
 
-  tcsetattr(0, TCSANOW, &oldt);
-  answer[strcspn(answer, "\r\n")] = '\0';
-  return strcmp(answer, "yes") == 0 ? 0 : -1;
+  *health = snapshot.result == VELAOPS_HEALTH_HEALTHY ?
+            "healthy" : "unhealthy";
+  return 0;
 }
 
-static int read_pin(char *pin, unsigned int size)
+static int velaops_post_request(const char *target, const char *body,
+                                const char *operation, bool evaluate_memory,
+                                bool quiet,
+                                velaops_display_state_t *display_state,
+                                char *result_output,
+                                size_t result_output_capacity)
 {
-  struct termios oldt;
-  struct termios newt;
-  bool changed = false;
+  velaops_device_config_t config;
+  velaops_proxy_http_context_t http_context;
+  velaops_proxy_client_t client;
+  velaops_auth_metadata_t metadata;
+  velaops_proxy_response_t response;
+  velaops_config_status_t config_status;
+  velaops_proxy_client_status_t client_status;
+  char request_id[33];
+  char nonce[33];
+  int metadata_status;
+  int exit_status = EXIT_FAILURE;
+  const char *health = NULL;
 
-  printf("Vault PIN: ");
-  fflush(stdout);
-
-  if (tcgetattr(0, &oldt) == 0)
+  if (display_state != NULL)
     {
-      newt = oldt;
-      newt.c_lflag |= ICANON;  /* 启用规范模式 */
-      newt.c_lflag &= ~ECHO;   /* 禁用回显 */
-      changed = tcsetattr(0, TCSANOW, &newt) == 0;
+      display_state->online = 0;
     }
 
-  if (fgets(pin, size, stdin) == NULL)
+  config_status = velaops_device_config_load(VELAOPS_CONFIG_FILE, &config);
+  if (config_status != VELAOPS_CONFIG_OK)
     {
-      if (changed) tcsetattr(0, TCSANOW, &oldt);
-      return -1;
+      if (!quiet)
+        {
+          fprintf(stderr, "velaops: 配置加载失败: %s\n",
+                  velaops_config_status_name(config_status));
+        }
+      return EXIT_FAILURE;
+    }
+  metadata_status = velaops_make_metadata(config.device_id, &metadata,
+                                           request_id, nonce);
+  if (metadata_status != 0)
+    {
+      if (!quiet)
+        {
+          fprintf(stderr, "velaops: %s未就绪\n",
+                  metadata_status == -2 ? "安全随机源" : "系统时间");
+        }
+      goto cleanup;
     }
 
-  if (changed)
+  http_context.host = config.host;
+  http_context.port = config.port;
+  http_context.timeout_seconds = VELAOPS_HTTP_TIMEOUT_SECONDS;
+  client.device_id = config.device_id;
+  client.secret = (const uint8_t *)config.secret;
+  client.secret_len = strlen(config.secret);
+  client.transport = velaops_proxy_http_transport;
+  client.transport_context = &http_context;
+
+  client_status = velaops_proxy_client_post_json(
+      &client, target, (const uint8_t *)body, strlen(body),
+      &metadata, &response);
+  if (client_status != VELAOPS_PROXY_CLIENT_OK)
     {
-      tcsetattr(0, TCSANOW, &oldt);
-      putchar('\n');
+      if (!quiet)
+        {
+          fprintf(stderr, "velaops: Proxy 请求失败: %s\n",
+                  velaops_proxy_client_status_name(client_status));
+        }
+      goto cleanup;
+    }
+  if (!response.ok)
+    {
+      if (!quiet)
+        {
+          fprintf(stderr,
+                  "velaops: Proxy 拒绝: http=%d code=%s retryable=%s "
+                  "message=%s\n",
+                  response.http_status, response.error_code,
+                  response.retryable ? "true" : "false",
+                  response.error_message);
+        }
+      goto cleanup;
     }
 
-  pin[strcspn(pin, "\r\n")] = '\0';
-  return pin[0] == '\0' ? -1 : 0;
+  if (result_output != NULL)
+    {
+      size_t result_length = strlen(response.result_json);
+
+      if (result_output_capacity == 0 ||
+          result_length >= result_output_capacity)
+        {
+          if (!quiet)
+            {
+              fprintf(stderr, "velaops: Agent 证据缓冲区不足\n");
+            }
+          goto cleanup;
+        }
+      memcpy(result_output, response.result_json, result_length + 1);
+    }
+
+  if (display_state != NULL)
+    {
+      display_state->online = 1;
+    }
+
+  if (evaluate_memory &&
+      velaops_get_memory_health(response.result_json, &health) != 0)
+    {
+      goto cleanup;
+    }
+  if (display_state != NULL && evaluate_memory)
+    {
+      velaops_health_snapshot_t snapshot;
+      if (velaops_memory_result_parse(response.result_json,
+                                      &display_state->memory) !=
+          VELAOPS_MEMORY_RESULT_OK ||
+          velaops_evaluate_memory(&display_state->memory,
+                                  VELAOPS_MEMORY_UNHEALTHY_PERCENT,
+                                  (int64_t)time(NULL), &snapshot) !=
+          VELAOPS_HEALTH_OK)
+        {
+          display_state->online = 0;
+          goto cleanup;
+        }
+      display_state->health = snapshot.result;
+      display_state->observed_at = snapshot.observed_at;
+    }
+  if (display_state != NULL && !evaluate_memory)
+    {
+      velaops_resource_observation_t resources;
+      velaops_health_snapshot_t snapshot;
+
+      if (velaops_resource_result_parse(response.result_json, &resources) != 0 ||
+          velaops_evaluate_memory(&resources.memory,
+                                  VELAOPS_MEMORY_UNHEALTHY_PERCENT,
+                                  (int64_t)time(NULL), &snapshot) !=
+          VELAOPS_HEALTH_OK)
+        {
+          display_state->online = 0;
+          goto cleanup;
+        }
+      display_state->resources = resources;
+      display_state->memory = resources.memory;
+      display_state->health = snapshot.result;
+      display_state->observed_at = snapshot.observed_at;
+      display_state->has_resources = 1;
+    }
+  if (operation != NULL)
+    {
+      printf("velaops: %s成功 request_id=%s", operation, request_id);
+      if (health != NULL)
+        {
+          printf(" health=%s", health);
+        }
+      printf(" result=%s\n", response.result_json);
+    }
+  exit_status = EXIT_SUCCESS;
+
+cleanup:
+  velaops_device_config_clear(&config);
+  return exit_status;
 }
 
-int main(int argc, char **argv)
+/* 屏显线程与监控线程都以 5s 节拍调用 fetcher，共享一份短 TTL 缓存：
+ * 既避免双线程并发打 Proxy，也把后台取证日志压到零。 */
+static pthread_mutex_t g_agent_fetch_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_agent_fetch_cache[VELAOPS_RESOURCE_RESULT_CAPACITY];
+static int64_t g_agent_fetch_cache_at = -1;
+#define VELAOPS_AGENT_FETCH_CACHE_SECONDS 4
+
+static int velaops_fetch_resources_for_agent(char *output,
+                                             size_t output_capacity)
 {
-  struct velaops_profile profile;
-  struct velaops_metrics metrics;
-  struct velaops_ssh *ssh = NULL;
-  char pin[64] = {0};
-  char fingerprint[VELAOPS_FINGERPRINT_MAX];
-  bool loaded = false;
-  bool cli_mode = false;  /* true when credentials come from argv */
-  int dashboard = 0;  /* 默认启用 LCD 看板 */
-  int rc = 1;
+  int64_t now = (int64_t)time(NULL);
+  int status;
 
-  memset(&profile, 0, sizeof(profile));
-  memset(&metrics, 0, sizeof(metrics));
-
-  puts("VelaOps Sentinel - SSH monitor MVP");
-
-  if (argc == 2 && strcmp(argv[1], "--demo") == 0)
-    return run_dashboard_demo();
-
-  velaops_state_init();
-  velaops_input_init();
-  velaops_led_init();
-  dashboard = velaops_dashboard_open();
-  if (dashboard == 0)
-    velaops_dashboard_draw(&profile, &metrics, "STARTING");
-
-  /* 初始化存储系统 */
-  if (velaops_storage_init() < 0)
+  if (output == NULL || output_capacity == 0)
     {
-      puts("Storage initialization failed.");
-      goto out;
+      return EXIT_FAILURE;
     }
-  if (dashboard == 0)
-    velaops_dashboard_draw(&profile, &metrics, "STORAGE OK");
-
-  /* 初始化 Wi-Fi 模块 */
-  if (velaops_wifi_init() < 0)
+  pthread_mutex_lock(&g_agent_fetch_lock);
+  if (g_agent_fetch_cache_at >= 0 &&
+      now - g_agent_fetch_cache_at < VELAOPS_AGENT_FETCH_CACHE_SECONDS)
     {
-      puts("Wi-Fi initialization failed.");
-      goto out;
+      strncpy(output, g_agent_fetch_cache, output_capacity - 1);
+      output[output_capacity - 1] = '\0';
+      pthread_mutex_unlock(&g_agent_fetch_lock);
+      return EXIT_SUCCESS;
     }
-  if (dashboard == 0)
-    velaops_dashboard_draw(&profile, &metrics, "NETWORK CHECK");
-
-  /* 尝试自动连接 Wi-Fi */
-  if (!velaops_wifi_is_connected())
+  status = velaops_post_request(VELAOPS_ACTION_TARGET,
+                                VELAOPS_CHECK_RESOURCES_BODY,
+                                NULL, false, true, NULL,
+                                output, output_capacity);
+  if (status == EXIT_SUCCESS)
     {
-      puts("Wi-Fi not connected. Attempting auto-connect...");
-      if (velaops_wifi_auto_connect() < 0)
+      strncpy(g_agent_fetch_cache, output, sizeof(g_agent_fetch_cache) - 1);
+      g_agent_fetch_cache[sizeof(g_agent_fetch_cache) - 1] = '\0';
+      g_agent_fetch_cache_at = now;
+    }
+  pthread_mutex_unlock(&g_agent_fetch_lock);
+  return status;
+}
+
+static int velaops_repair_demo_service(char *output, size_t output_capacity)
+{
+  velaops_button_approval_result_t approval_result;
+  uint8_t approval_random[16];
+  char approval_id[33];
+  char request_body[VELAOPS_REPAIR_REQUEST_CAPACITY];
+  char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
+  bool recovered;
+  time_t approved_at;
+  unsigned int attempt;
+
+  if (output == NULL || output_capacity == 0)
+    {
+      return ERROR;
+    }
+  if (velaops_ensure_time() != 0)
+    {
+      return velaops_guarded_repair_format_result(
+          "not_started", false, "approval_unavailable", 0,
+          output, output_capacity);
+    }
+
+  printf("velaops: 请在 30 秒内连续长按 BOOT 2 秒批准重启 demo 服务\n");
+  approval_result = velaops_button_wait_for_long_press(
+      VELAOPS_APPROVAL_HOLD_MS, VELAOPS_APPROVAL_TIMEOUT_MS);
+  if (approval_result == VELAOPS_BUTTON_TIMEOUT)
+    {
+      return velaops_guarded_repair_format_result(
+          "not_started", false, "approval_timeout", 0,
+          output, output_capacity);
+    }
+  if (approval_result != VELAOPS_BUTTON_APPROVED ||
+      getrandom(approval_random, sizeof(approval_random), GRND_RANDOM) !=
+      sizeof(approval_random))
+    {
+      return velaops_guarded_repair_format_result(
+          "not_started", false, "approval_unavailable", 0,
+          output, output_capacity);
+    }
+
+  approved_at = time(NULL);
+  velaops_hex_encode(approval_random, sizeof(approval_random), approval_id);
+  if (velaops_guarded_repair_build_request(
+          approval_id, (int64_t)approved_at,
+          (int64_t)approved_at + VELAOPS_APPROVAL_VALIDITY_SECONDS,
+          request_body, sizeof(request_body)) != 0 ||
+      velaops_post_request(VELAOPS_ACTION_TARGET, request_body,
+                           "白名单服务重启", false, false, NULL,
+                           NULL, 0) != EXIT_SUCCESS)
+    {
+      /* 传输中断时无法证明服务端是否执行，必须报告 unknown 而不是盲目重试。 */
+      return velaops_guarded_repair_format_result(
+          "unknown", false, "execution_failed", 0,
+          output, output_capacity);
+    }
+
+  for (attempt = 1; attempt <= VELAOPS_REPAIR_VERIFY_ATTEMPTS; attempt++)
+    {
+      /* systemd active 可能早于监听端口就绪，使用新的 request ID 有界复核。 */
+      sleep(1);
+      if (velaops_post_request(
+              VELAOPS_ACTION_TARGET, VELAOPS_CHECK_RESOURCES_BODY,
+              NULL, false, false, NULL, resources, sizeof(resources)) ==
+          EXIT_SUCCESS &&
+          velaops_guarded_repair_verify(resources, &recovered) == 0 &&
+          recovered)
         {
-          puts("Wi-Fi auto-connect unavailable; starting first-run setup.");
-          if (velaops_wifi_prompt_and_connect() < 0)
+          return velaops_guarded_repair_format_result(
+              "completed", true, "recovered", attempt,
+              output, output_capacity);
+        }
+    }
+  return velaops_guarded_repair_format_result(
+      "completed", false, "verification_failed",
+      VELAOPS_REPAIR_VERIFY_ATTEMPTS, output, output_capacity);
+}
+
+static int velaops_run_local_diagnosis(void)
+{
+  char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
+  char diagnosis[VELAOPS_LOCAL_DIAGNOSIS_CAPACITY];
+  int fetch_status;
+
+  fetch_status = velaops_post_request(VELAOPS_ACTION_TARGET,
+                                      VELAOPS_CHECK_RESOURCES_BODY,
+                                      NULL, false, false, NULL,
+                                      resources, sizeof(resources));
+  if (velaops_local_diagnosis_build(
+          fetch_status == EXIT_SUCCESS ? resources : NULL,
+          diagnosis, sizeof(diagnosis)) != 0)
+    {
+      fprintf(stderr, "velaops: 本地诊断编码失败\n");
+      return EXIT_FAILURE;
+    }
+
+  /* 最后一行始终是机器可解析的降级诊断。取证失败时仍输出 unknown，
+   * 同时保留失败退出码，便于脚本区分真实成功和安全降级。
+   */
+
+  printf("%s\n", diagnosis);
+  return fetch_status;
+}
+
+struct velaops_button_context_s
+{
+  int fd;
+  btn_buttonset_t supported;
+  btn_buttonset_t previous;
+  unsigned int *page;
+  velaops_display_t *display;
+  velaops_display_state_t *state;
+  pthread_mutex_t *display_lock;
+};
+
+/* 连续巡检失败说明链路层可能已掉线（冷启动早期窗口实测会发生，
+ * 表现为 ifconfig 仍 RUNNING 但收发全停）。主动修复：先续 DHCP，
+ * 不行再按开机同款全套流程（mode→psk→essid）重新关联。 */
+static void velaops_monitor_repair_network(void)
+{
+  char command[192];
+  char ssid[64];
+  char password[80];
+  FILE *file;
+
+  system("renew wlan0");
+
+  ssid[0] = '\0';
+  password[0] = '\0';
+  file = fopen(VELAOPS_MONITOR_CREDENTIAL_PATH, "r");
+  if (file != NULL)
+    {
+      char line[192];
+
+      while (fgets(line, sizeof(line), file) != NULL)
+        {
+          const char *value;
+          char *dest;
+          size_t capacity;
+          size_t length;
+
+          if (strncmp(line, "WIFI_SSID=", 10) == 0)
             {
-              puts("Wi-Fi setup failed. Check SSID/password and retry.");
-              goto out;
+              value = line + 10;
+              dest = ssid;
+              capacity = sizeof(ssid);
             }
-        }
-      else
-        {
-          puts("Wi-Fi connected successfully.");
-        }
-    }
-  else
-    {
-      puts("Wi-Fi already connected.");
-    }
-
-  /* 获取 vault 路径 */
-  const char *vault_path = velaops_storage_get_vault_path();
-
-  /* 检查命令行参数或使用默认配置 */
-  if (argc >= 4)
-    {
-      /* 从命令行参数获取配置: velaops <host> <user> <password> [port] */
-      strncpy(profile.host, argv[1], sizeof(profile.host) - 1);
-      strncpy(profile.user, argv[2], sizeof(profile.user) - 1);
-      strncpy(profile.secret, argv[3], sizeof(profile.secret) - 1);
-      profile.port = (argc >= 5) ? atoi(argv[4]) : 22;
-      profile.auth_kind = VELAOPS_AUTH_PASSWORD;
-      if (read_pin(pin, sizeof(pin)) < 0)
-        {
-          puts("Vault PIN input failed.");
-          goto out;
-        }
-      loaded = false;  /* 需要保存到 vault */
-      cli_mode = true;
-      printf("Using command-line config: %s@%s:%d\n", profile.user, profile.host, profile.port);
-    }
-  else if (velaops_storage_vault_exists())
-    {
-      if (read_pin(pin, sizeof(pin)) < 0) goto out;
-      if (velaops_vault_load(vault_path, &profile, pin) < 0)
-        {
-          puts("Vault unlock failed.");
-          goto out;
-        }
-      loaded = true;
-    }
-  else if (velaops_config_prompt(&profile, pin, sizeof(pin)) < 0)
-    {
-      puts("Invalid configuration.");
-      puts("Usage: velaops <host> <user> <password> [port]");
-      goto out;
-    }
-
-  /* 设置 Wi-Fi 连通性探测目标为 SSH 服务器地址。
-   * 这让 Wi-Fi monitor 能通过 TCP 探测检测驱动失活
-   * （接口 UP 但实际不工作的情况）。 */
-
-  velaops_wifi_set_probe_target(profile.host, profile.port);
-
-  /* 连接 SSH，最多重试 3 次（ESP32-S3 Wi-Fi 驱动不稳定，首次连接可能失败） */
-  {
-    int ssh_conn_attempts = 0;
-    while (ssh_conn_attempts < 3)
-      {
-        velaops_state_handle_event(EVENT_CONNECT);
-        velaops_led_update();
-        if (dashboard == 0)
-          velaops_dashboard_draw(&profile, &metrics, "SSH CONNECTING");
-        ssh = velaops_ssh_connect(&profile, fingerprint, sizeof(fingerprint));
-        if (ssh != NULL)
-          break;
-
-        ssh_conn_attempts++;
-        printf("SSH transport connection failed (attempt %d/3)\n",
-               ssh_conn_attempts);
-        if (ssh_conn_attempts < 3)
-          {
-            /* 检查 Wi-Fi 是否仍然连接 */
-            if (!velaops_wifi_is_connected())
-              {
-                puts("Wi-Fi connection lost. Attempting reconnect...");
-                velaops_wifi_reconnect();
-              }
-            sleep(3);
-          }
-      }
-    if (ssh == NULL)
-      {
-        puts("SSH transport connection failed after 3 attempts.");
-        goto out;
-      }
-  }
-
-  /* 验证服务器指纹 */
-  if (profile.fingerprint[0] == '\0')
-    {
-      if (cli_mode)
-        {
-          /* CLI 模式自动信任首次连接的服务器指纹 */
-          printf("Auto-trusting server fingerprint (CLI mode): %s\n",
-                 fingerprint);
-        }
-      else
-        {
-          if (dashboard == 0)
-            velaops_dashboard_draw(&profile, &metrics, "VERIFY SERVER KEY");
-          if (confirm_fingerprint(fingerprint) < 0)
+          else if (strncmp(line, "WIFI_PASSWORD=", 14) == 0)
             {
-              puts("Server key was not trusted; connection stopped.");
-              goto out;
-            }
-        }
-      snprintf(profile.fingerprint, sizeof(profile.fingerprint), "%s",
-               fingerprint);
-    }
-  else if (strcmp(profile.fingerprint, fingerprint) != 0)
-    {
-      puts("SECURITY ERROR: server public key changed; connection stopped.");
-      if (dashboard == 0) velaops_dashboard_draw(&profile, &metrics, "KEY CHANGED");
-      goto out;
-    }
-
-  /* 密码认证，最多重试 3 次 */
-  if (profile.auth_kind == VELAOPS_AUTH_PASSWORD)
-    {
-      int auth_attempts = 0;
-      int auth_success = 0;
-      while (auth_attempts < 3 && !auth_success)
-        {
-          if (velaops_ssh_auth_password(ssh, profile.secret) == 0)
-            {
-              auth_success = 1;
+              value = line + 14;
+              dest = password;
+              capacity = sizeof(password);
             }
           else
             {
-              auth_attempts++;
-              printf("SSH authentication failed (attempt %d/3)\n", auth_attempts);
-              if (auth_attempts < 3)
-                {
-                  printf("Retrying...\n");
-                  sleep(1);
-                }
+              continue;
+            }
+
+          length = strlen(value);
+          while (length > 0 && (value[length - 1] == '\n' ||
+                                value[length - 1] == '\r' ||
+                                value[length - 1] == ' ' ||
+                                value[length - 1] == '\t'))
+            {
+              length--;
+            }
+
+          if (length < capacity)
+            {
+              memcpy(dest, value, length);
+              dest[length] = '\0';
             }
         }
-      if (!auth_success)
-        {
-          puts("SSH authentication failed after 3 attempts.");
-          if (dashboard == 0) velaops_dashboard_draw(&profile, &metrics, "AUTH FAILED");
-          goto out;
-        }
+
+      fclose(file);
     }
-  else if (profile.auth_kind == VELAOPS_AUTH_PRIVATE_KEY)
+
+  if (ssid[0] == '\0' || password[0] == '\0')
     {
-      if (velaops_ssh_auth_publickey(ssh, profile.private_key_path) < 0)
-        {
-          puts("SSH public-key authentication failed.");
-          goto out;
-        }
+      printf("velaops monitor: 巡检连续失败，凭据不可用，仅已续租 DHCP\n");
+      return;
     }
-  else
+
+  /* 与 velaops_autoconfig_connect_wifi 保持一致的重关联序列；
+   * 先 ifdown/ifup 复位接口，驱动假活（RUNNING 但收发全停）时这是唯一解。
+   * 注意：重关联后握手需要时间，必须等足再续租，否则反复打断关联，
+   * 自愈反而成为掉线的元凶（实测：连续重关联时永远关联不上，
+   * 停手后一次就成）。 */
+  system("ifdown wlan0");
+  system("ifup wlan0");
+  sleep(3);
+  system("wapi mode wlan0 2");
+  snprintf(command, sizeof(command), "wapi psk wlan0 '%s' 3 2", password);
+  system(command);
+  snprintf(command, sizeof(command), "wapi essid wlan0 '%s' 1", ssid);
+  system(command);
+
+  /* 等关联握手完成再续租；失败则再给一轮机会。 */
+  sleep(8);
+  system("renew wlan0");
+  printf("velaops monitor: 巡检连续失败，已重新关联 %s\n", ssid);
+}
+
+static bool velaops_monitor_show_popup(velaops_display_t *display)
+{
+  FILE *file;
+  char message[25];
+  size_t length;
+
+  file = fopen("/tmp/velaops-popup.txt", "r");
+  if (file == NULL)
     {
-      puts("Unsupported authentication method.");
-      if (dashboard == 0) velaops_dashboard_draw(&profile, &metrics, "AUTH FAILED");
-      goto out;
+      return false;
     }
 
-  /* 保存配置（如果是首次配置） */
-  if (!loaded)
+  length = fread(message, 1, sizeof(message) - 1, file);
+  fclose(file);
+  message[length] = '\0';
+  if (length == 0 || velaops_display_show_message(
+                         display, "AGENT MESSAGE", message, 0) != 0)
     {
-      if (velaops_vault_save(vault_path, &profile, pin) < 0)
-        puts("Warning: encrypted vault could not be saved; session continues.");
-      else
-        puts("Encrypted credential vault saved (AES-256-GCM/PBKDF2).");
+      return false;
     }
 
-  /* 清除 PIN（密码保留在 profile 中供重连使用） */
-  velaops_secure_zero(pin, sizeof(pin));
+  unlink("/tmp/velaops-popup.txt");
+  return true;
+}
 
-  velaops_state_handle_event(EVENT_CONNECTED);
-  velaops_state_handle_event(EVENT_CONNECT);
-  velaops_led_update();
+static void *velaops_button_worker(void *argument)
+{
+  struct velaops_button_context_s *context = argument;
+  btn_buttonset_t sample;
 
-  /* 主监控循环 */
-  puts("SSH connected. Refreshing CPU/memory every 5 seconds; Ctrl-C to stop.");
-  int consecutive_failures = 0;
-  const int max_failures = 5;
   for (;;)
     {
-      struct velaops_alert alerts[8];
-      int alert_count;
-
-      /* 注意：不在每轮都调用 velaops_wifi_monitor()。
-       * 它会对 SSH 服务器发起 TCP 探测，每 4 秒一条额外的 TCP 连接。
-       * ESP32-S3 Wi-Fi 驱动在密集 TCP 操作下不稳定，持续探测反而会
-       * 引入多余的链路扰动。只有 SSH 采集失败时才进入 Wi-Fi 检查。 */
-
-      if (velaops_metrics_collect(ssh, &metrics) == 0)
+      if (read(context->fd, &sample, sizeof(sample)) == sizeof(sample))
         {
-          consecutive_failures = 0; /* 重置失败计数 */
-          printf("CPU %.1f%%  MEM %.1f%% (%lu/%lu MB)\n",
-                 metrics.cpu_percent, metrics.memory_percent,
-                 (metrics.memory_total_kb - metrics.memory_available_kb) / 1024,
-                 metrics.memory_total_kb / 1024);
-          alert_count = velaops_rules_evaluate(&metrics, alerts, 8);
-          if (alert_count > 0)
+          if ((sample & context->supported) != 0 &&
+              (context->previous & context->supported) == 0)
             {
-              int i;
-              for (i = 0; i < alert_count; i++) velaops_alert_print(&alerts[i]);
-              if (!velaops_state_has_alerts())
-                velaops_state_handle_event(EVENT_ALERT);
+              pthread_mutex_lock(context->display_lock);
+              *context->page =
+                  (*context->page + 1) % VELAOPS_DISPLAY_PAGE_COUNT;
+              velaops_display_show(context->display, context->state,
+                                   *context->page);
+              pthread_mutex_unlock(context->display_lock);
             }
-          velaops_led_update();
-          if (dashboard == 0)
-            velaops_dashboard_draw(&profile, &metrics,
-                                   alert_count ? "ALERT CHECK CONSOLE" :
-                                                 "MONITORING OK");
+          context->previous = sample;
         }
-      else
-        {
-          consecutive_failures++;
-          printf("Metric collection failed (%d/%d)\n",
-                 consecutive_failures, max_failures);
-          if (dashboard == 0)
-            velaops_dashboard_draw(&profile, &metrics, "METRIC ERROR");
+      usleep(50000);
+    }
+  return NULL;
+}
 
-          if (consecutive_failures >= max_failures)
-            {
-              puts("Too many consecutive failures. Connection may be lost.");
-              if (dashboard == 0)
-                velaops_dashboard_draw(&profile, &metrics, "CONNECTION LOST");
+int main(int argc, char *argv[])
+{
+  /* NTP 不稳定时由开发机注入当前 Unix 时间，避免比赛演示被校时阻塞。
+   * 该入口不接收密钥，也不改变 HMAC 和防重放校验。
+   */
 
-              /* 仅在 SSH 连续失败时检查 Wi-Fi，避免持续探测扰动链路 */
-              velaops_wifi_monitor();
-
-              /* 检查 Wi-Fi 连接 */
-              if (!velaops_wifi_is_connected())
-                {
-                  puts("Wi-Fi connection lost. Attempting reconnect...");
-                  if (velaops_wifi_reconnect() < 0)
-                    {
-                      puts("Wi-Fi reconnect failed.");
-                    }
-                }
-
-              /* 尝试重新连接 SSH */
-              velaops_ssh_close(ssh);
-              ssh = velaops_ssh_connect(&profile, fingerprint, sizeof(fingerprint));
-              if (ssh == NULL)
-                {
-                  puts("SSH reconnect failed. Retrying...");
-                  sleep(3);
-                  continue;
-                }
-              /* 重新认证 */
-              if (profile.auth_kind == VELAOPS_AUTH_PASSWORD)
-                {
-                  if (velaops_ssh_auth_password(ssh, profile.secret) != 0)
-                    {
-                      puts("SSH re-auth failed. Retrying...");
-                      velaops_ssh_close(ssh);
-                      ssh = NULL;
-                      sleep(3);
-                      continue;
-                    }
-                }
-              puts("SSH reconnected and authenticated.");
-              consecutive_failures = 0;
-            }
-        }
-      {
-        int i;
-        for (i = 0; i < 16; i++)
-          {
-            velaops_led_update();
-            usleep(250000);
-          }
-      }
+  if (argc == 3 && strcmp(argv[1], "set-time") == 0)
+    {
+      return velaops_set_demo_time(argv[2]);
     }
 
-  rc = 0;
-out:
-  velaops_secure_zero(profile.secret, sizeof(profile.secret));
-  velaops_secure_zero(pin, sizeof(pin));
-  velaops_ssh_close(ssh);
-  velaops_input_close();
-  if (dashboard == 0) velaops_dashboard_close();
-  velaops_led_close();
-  velaops_state_stop();
-  return rc;
+  if (argc >= 3 && strcmp(argv[1], "ask-inject") == 0)
+    {
+      /* 串口上 nsh 与 agent CLI 抢占输入，直接发 ask 经常被抢走。
+       * 此子命令把文本写入队列文件，由 ai_agent 的 ask_queue 线程读走，
+       * 等价于 vela> ask。单次 fwrite 落盘，避免读侧看到半行。 */
+      char message[512];
+      size_t length = 0;
+      FILE *file;
+      int i;
+
+      for (i = 2; i < argc && length < sizeof(message) - 2; i++)
+        {
+          int written = snprintf(message + length,
+                                 sizeof(message) - length,
+                                 "%s%s", i > 2 ? " " : "", argv[i]);
+          if (written < 0)
+            {
+              break;
+            }
+
+          length += (size_t)written < sizeof(message) - length
+                        ? (size_t)written
+                        : sizeof(message) - length - 1;
+        }
+
+      message[length++] = '\n';
+      file = fopen("/tmp/vela-ask.txt", "w");
+      if (file == NULL)
+        {
+          fprintf(stderr, "velaops: 无法写入 /tmp/vela-ask.txt\n");
+          return EXIT_FAILURE;
+        }
+
+      fwrite(message, 1, length, file);
+      fclose(file);
+
+      /* 联调按钮需要可重复、可验收的即时反馈；同时保留 ask 队列让
+       * Agent 继续处理完整事件。看板会用唯一 LCD 句柄消费这个弹窗。 */
+      if (strstr(message, "屏幕显示联调测试") != NULL)
+        {
+          file = fopen("/tmp/velaops-popup.txt", "w");
+          if (file != NULL)
+            {
+              fwrite("TEST-OK", 1, 7, file);
+              fclose(file);
+            }
+        }
+      return EXIT_SUCCESS;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "display-test") == 0)
+    {
+      velaops_display_t *display = velaops_display_open();
+      int result;
+
+      if (display == NULL)
+        {
+          fprintf(stderr, "velaops: 无法打开 /dev/lcd0\n");
+          return EXIT_FAILURE;
+        }
+
+      result = velaops_display_show_test(display);
+      velaops_display_close(display);
+      return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "auth-check") == 0)
+    {
+      return velaops_post_request(VELAOPS_AUTH_TARGET, VELAOPS_AUTH_BODY,
+                                  "认证", false, false, NULL, NULL, 0);
+    }
+
+  if (argc == 2 && strcmp(argv[1], "autoconfig") == 0)
+    {
+      /* TF 卡凭据自动配置：上电由 bringup 拉起，也可手动执行。 */
+      return velaops_autoconfig_run(1) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+
+  if (argc == 3 && strcmp(argv[1], "fmtsd") == 0)
+    {
+      /* 限定扇区数把 TF 卡格式化为无分区表的 FAT：全卡格式化在
+       * 大容量卡上按 512B 单块写要几十分钟，取前 N 扇区即可。
+       * 用 FAT16：小容量卡上 FAT32 需 ≥65525 簇会报 ENFILE。 */
+
+      struct fat_format_s fmt = FAT_FORMAT_INITIALIZER;
+
+      fmt.ff_fattype  = 16;
+      fmt.ff_nsectors = (uint32_t)strtoul(argv[2], NULL, 10);
+      printf("fmtsd: 开始格式化 /dev/mmcsd1 前 %lu 扇区\n",
+             (unsigned long)fmt.ff_nsectors);
+      if (mkfatfs("/dev/mmcsd1", &fmt) < 0)
+        {
+          fprintf(stderr, "fmtsd: mkfatfs failed: %d\n", errno);
+          return EXIT_FAILURE;
+        }
+
+      /* 写后回读自检：写卡偶发静默丢数据，直接看扇区0是否真有
+       * FAT 引导签名（0x55AA 在 510/511 偏移）。延迟与多次回读用于
+       * 区分卡编程延迟和真丢数据。 */
+      {
+        unsigned char sector[512];
+        int fd;
+        int probe;
+
+        for (probe = 0; probe < 3; probe++)
+          {
+            sleep(1);
+            fd = open("/dev/mmcsd1", O_RDONLY);
+            if (fd >= 0 &&
+                read(fd, sector, sizeof(sector)) == sizeof(sector))
+              {
+                printf("fmtsd: 回读%d sector0 jump=%02x sig=%02x%02x\n",
+                       probe, sector[0], sector[511], sector[510]);
+              }
+            else
+              {
+                printf("fmtsd: 回读%d 失败 errno=%d\n", probe, errno);
+              }
+
+            if (fd >= 0)
+              {
+                close(fd);
+              }
+          }
+      }
+
+      printf("fmtsd: 完成\n");
+      return EXIT_SUCCESS;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "sdtest") == 0)
+    {
+      /* 原始块设备写读自检：判定写卡丢数据是硬件/驱动层还是文件系统层。
+       * 分别对扇区 0（引导区）和扇区 10 写特征图案并回读比对。 */
+
+      static unsigned char sector[512];
+      static const long targets[] = {0, 10};
+      int round;
+
+      for (round = 0; round < 2; round++)
+        {
+          ssize_t n;
+          long target = targets[round];
+          int fd;
+          int i;
+          int ok;
+
+          for (i = 0; i < 512; i++)
+            {
+              sector[i] = (unsigned char)(0xa0 + round + (i & 0x0f));
+            }
+
+          fd = open("/dev/mmcsd1", O_RDWR);
+          if (fd < 0)
+            {
+              printf("sdtest: open 失败 errno=%d\n", errno);
+              return EXIT_FAILURE;
+            }
+
+          if (lseek(fd, target * 512, SEEK_SET) != target * 512 ||
+              write(fd, sector, sizeof(sector)) != (ssize_t)sizeof(sector))
+            {
+              printf("sdtest: 写失败 errno=%d\n", errno);
+              close(fd);
+              return EXIT_FAILURE;
+            }
+
+          close(fd);
+
+          /* 重新打开回读，避免命中任何读缓存。 */
+          fd = open("/dev/mmcsd1", O_RDONLY);
+          memset(sector, 0, sizeof(sector));
+          n = (fd >= 0 && lseek(fd, target * 512, SEEK_SET) == target * 512)
+                ? read(fd, sector, sizeof(sector))
+                : -1;
+          if (fd >= 0)
+            {
+              close(fd);
+            }
+
+          ok = (n == (ssize_t)sizeof(sector));
+          for (i = 0; ok && i < 512; i++)
+            {
+              if (sector[i] != (unsigned char)(0xa0 + round + (i & 0x0f)))
+                {
+                  ok = 0;
+                }
+            }
+
+          printf("sdtest: sector=%ld read=%d 首4字节=%02x%02x%02x%02x %s\n",
+                 target, (int)n, sector[0], sector[1], sector[2], sector[3],
+                 ok ? "OK" : "MISMATCH");
+        }
+
+      return EXIT_SUCCESS;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "check-memory") == 0)
+    {
+      /* CLI 只暴露预编译的结构化 Action，不接受用户传入任意
+       * Action 名、目标或 JSON，从设备边界阻断命令注入。
+       */
+
+      return velaops_post_request(VELAOPS_ACTION_TARGET,
+                                  VELAOPS_CHECK_MEMORY_BODY, "内存巡检", true,
+                                  false, NULL, NULL, 0);
+    }
+
+  if (argc == 2 && strcmp(argv[1], "agent-install") == 0)
+    {
+      if (velaops_agent_tools_register(velaops_fetch_resources_for_agent,
+                                       velaops_agent_monitor_start,
+                                       velaops_repair_demo_service) !=
+          OK)
+        {
+          fprintf(stderr, "velaops: AI Agent 工具注册失败\n");
+          return EXIT_FAILURE;
+        }
+      printf("velaops: AI Agent 只读工具已注册\n");
+      return EXIT_SUCCESS;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "repair-demo") == 0)
+    {
+      char result[VELAOPS_REPAIR_RESULT_CAPACITY];
+
+      if (velaops_repair_demo_service(result, sizeof(result)) != 0)
+        {
+          fprintf(stderr, "velaops: 修复结果编码失败\n");
+          return EXIT_FAILURE;
+        }
+      printf("%s\n", result);
+      return EXIT_SUCCESS;
+    }
+
+  if (argc == 2 && strcmp(argv[1], "diagnose-local") == 0)
+    {
+      return velaops_run_local_diagnosis();
+    }
+
+  if (argc == 2 && strcmp(argv[1], "monitor") == 0)
+    {
+      velaops_display_t *display;
+      velaops_display_state_t state = {0};
+      velaops_resource_incident_t resource_incident;
+      btn_buttonset_t supported;
+      unsigned int page = 0;
+      unsigned int consecutive_failures = 0;
+      time_t next_refresh = 0;
+      int button_fd;
+      pthread_t button_thread;
+      pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
+      struct velaops_button_context_s button_context;
+
+      if (velaops_resource_incident_init(
+              &resource_incident, VELAOPS_INCIDENT_FAILURE_THRESHOLD,
+              VELAOPS_INCIDENT_RECOVERY_THRESHOLD) !=
+          VELAOPS_RESOURCE_INCIDENT_OK)
+        {
+          fprintf(stderr, "velaops: 无法初始化主动事件状态\n");
+          return EXIT_FAILURE;
+        }
+
+      display = velaops_display_open();
+      if (display == NULL)
+        {
+          fprintf(stderr, "velaops: 无法打开 /dev/lcd0\n");
+          return EXIT_FAILURE;
+        }
+      button_fd = open(VELAOPS_BUTTON_DEVICE, O_RDONLY | O_NONBLOCK);
+      if (button_fd < 0 || ioctl(button_fd, BTNIOC_SUPPORTED,
+                                 (unsigned long)(uintptr_t)&supported) < 0)
+        {
+          fprintf(stderr, "velaops: 无法打开 /dev/buttons\n");
+          if (button_fd >= 0)
+            {
+              close(button_fd);
+            }
+          velaops_display_close(display);
+          return EXIT_FAILURE;
+        }
+      button_context.fd = button_fd;
+      button_context.supported = supported;
+      button_context.previous = 0;
+      button_context.page = &page;
+      button_context.display = display;
+      button_context.state = &state;
+      button_context.display_lock = &display_lock;
+      if (pthread_create(&button_thread, NULL, velaops_button_worker,
+                         &button_context) != 0)
+        {
+          fprintf(stderr, "velaops: 无法启动按键线程\n");
+          close(button_fd);
+          velaops_display_close(display);
+          return EXIT_FAILURE;
+        }
+      velaops_display_show(display, &state, page);
+      for (;;)
+        {
+          if (time(NULL) >= next_refresh)
+            {
+              velaops_display_state_t refreshed;
+              char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
+              char diagnosis[VELAOPS_LOCAL_DIAGNOSIS_CAPACITY];
+              velaops_incident_event_t incident_event;
+              velaops_resource_incident_status_t incident_status;
+              int request_status;
+
+              /* 网络请求可能阻塞数秒。只在线程私有副本上更新，完成后再
+               * 一次性交给显示线程，避免 BOOT 翻页读到半更新状态。
+               */
+
+              pthread_mutex_lock(&display_lock);
+              refreshed = state;
+              pthread_mutex_unlock(&display_lock);
+              request_status = velaops_post_request(
+                  VELAOPS_ACTION_TARGET, VELAOPS_CHECK_RESOURCES_BODY,
+                  "资源巡检", false, false, &refreshed,
+                  resources, sizeof(resources));
+              if (request_status == EXIT_SUCCESS)
+                {
+                  consecutive_failures = 0;
+                  incident_status = velaops_resource_incident_apply(
+                      &resource_incident, resources, refreshed.observed_at,
+                      &incident_event, diagnosis, sizeof(diagnosis));
+                  if (incident_status == VELAOPS_RESOURCE_INCIDENT_OK &&
+                      incident_event != VELAOPS_INCIDENT_EVENT_NONE)
+                    {
+                      printf("velaops: proactive_event type=%s generation=%lu "
+                             "diagnosis=%s\n",
+                             incident_event == VELAOPS_INCIDENT_EVENT_OPENED ?
+                             "opened" : "recovered",
+                             (unsigned long)resource_incident.tracker.generation,
+                             diagnosis);
+                    }
+                }
+              else if (++consecutive_failures ==
+                       VELAOPS_MONITOR_REPAIR_AFTER_FAILURES)
+                {
+                  velaops_monitor_repair_network();
+                  consecutive_failures = 0;
+                }
+              pthread_mutex_lock(&display_lock);
+              state = refreshed;
+              if (!velaops_monitor_show_popup(display))
+                {
+                  velaops_display_show(display, &state, page);
+                }
+              pthread_mutex_unlock(&display_lock);
+              next_refresh = time(NULL) + VELAOPS_MONITOR_INTERVAL_SECONDS;
+            }
+          sleep(1);
+        }
+    }
+
+  fprintf(stderr,
+          "用法: velaops <auth-check|autoconfig|fmtsd SECTORS|sdtest|check-memory|"
+          "agent-install|"
+          "diagnose-local|monitor|"
+          "repair-demo|"
+          "display-test|"
+          "set-time EPOCH>\n");
+  return EXIT_FAILURE;
 }

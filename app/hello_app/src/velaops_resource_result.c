@@ -1,0 +1,102 @@
+/****************************************************************************
+ * VelaOps Proxy 聚合资源结果适配器实现。
+ ****************************************************************************/
+
+#include "velaops_resource_result.h"
+
+#include <math.h>
+#include <string.h>
+
+#include "cJSON.h"
+
+static const cJSON *velaops_object(const cJSON *root, const char *name)
+{
+  const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+  return cJSON_IsObject(item) ? item : NULL;
+}
+
+static bool velaops_number(const cJSON *root, const char *name, double *value)
+{
+  const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+  if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble))
+    {
+      return false;
+    }
+  *value = item->valuedouble;
+  return true;
+}
+
+int velaops_resource_result_parse(const char *result_json,
+                                  velaops_resource_observation_t *result)
+{
+  cJSON *root;
+  const cJSON *memory;
+  const cJSON *disk;
+  const cJSON *service;
+  const cJSON *port;
+  const cJSON *item;
+  velaops_resource_observation_t parsed = {0};
+  double value;
+
+  if (result_json == NULL || result == NULL)
+    {
+      return -1;
+    }
+  root = cJSON_ParseWithOpts(result_json, NULL, true);
+  memory = cJSON_IsObject(root) ? velaops_object(root, "memory") : NULL;
+  disk = cJSON_IsObject(root) ? velaops_object(root, "disk") : NULL;
+  service = cJSON_IsObject(root) ? velaops_object(root, "service") : NULL;
+  port = cJSON_IsObject(root) ? velaops_object(root, "port") : NULL;
+  if (memory == NULL || disk == NULL || service == NULL || port == NULL ||
+      !velaops_number(memory, "total_bytes", &value) || value < 0 || floor(value) != value)
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  parsed.memory.total_bytes = (uint64_t)value;
+  if (!velaops_number(memory, "available_bytes", &value) || value < 0 || floor(value) != value)
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  parsed.memory.available_bytes = (uint64_t)value;
+  if (!velaops_number(memory, "used_bytes", &value) || value < 0 || floor(value) != value)
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  parsed.memory.used_bytes = (uint64_t)value;
+  if (!velaops_number(memory, "used_percent", &parsed.memory.used_percent) ||
+      !velaops_number(disk, "used_percent", &parsed.disk_percent) ||
+      parsed.memory.available_bytes > parsed.memory.total_bytes ||
+      parsed.memory.used_bytes > parsed.memory.total_bytes ||
+      parsed.memory.used_percent < 0.0 || parsed.memory.used_percent > 100.0 ||
+      parsed.disk_percent < 0.0 || parsed.disk_percent > 100.0)
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  item = cJSON_GetObjectItemCaseSensitive(service, "active_state");
+  if (!cJSON_IsString(item) || item->valuestring == NULL)
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  parsed.service_active = strcmp(item->valuestring, "active") == 0;
+  item = cJSON_GetObjectItemCaseSensitive(port, "reachable");
+  if (!cJSON_IsBool(item) || !velaops_number(port, "latency_ms", &value))
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  parsed.port_reachable = cJSON_IsTrue(item);
+  if (value < 0 || value > 2147483647.0 || floor(value) != value)
+    {
+      cJSON_Delete(root);
+      return -1;
+    }
+  parsed.port_latency_ms = (int)value;
+  cJSON_Delete(root);
+  *result = parsed;
+  return 0;
+}

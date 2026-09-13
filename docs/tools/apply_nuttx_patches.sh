@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+team_root=$(cd "$script_dir/../.." && pwd)
+workspace_root=$(cd "$team_root/.." && pwd)
+
+apply_patch_dir() {
+  local patch_dir="$1"
+  local target_repo="$2"
+  local patch_file name
+  [ -d "$patch_dir" ] || return 0
+  # 按文件名顺序应用补丁；已应用的补丁（反向检查通过）自动跳过，
+  # 可重复执行。
+  for patch_file in "$patch_dir"/*.patch; do
+    [ -e "$patch_file" ] || continue
+    name=$(basename "$patch_file")
+    if git -C "$target_repo" apply --check --reverse "$patch_file" \
+        2>/dev/null; then
+      echo "$name already applied"
+      continue
+    fi
+
+    git -C "$target_repo" apply --check "$patch_file"
+    git -C "$target_repo" apply "$patch_file"
+    echo "Applied $name"
+  done
+}
+
+# patches/nuttx：打到 NuttX 主仓（SD 卡写路径修复、ST7789 字节序等）。
+apply_patch_dir "$team_root/patches/nuttx" "$workspace_root/nuttx"
+# patches/vendor：打到板级 vendor 仓（bringup 自启、defconfig）。
+# 注意：真实编译的 bringup 是 vendor 仓 esp32s3-eye/src/esp32s3_bringup.c
+# （nuttx boards common/ 下是符号链接），nuttx 仓 esp32s3-eye/src/ 的同名副本从不参与编译。
+apply_patch_dir "$team_root/patches/vendor" "$workspace_root/vendor/espressif"

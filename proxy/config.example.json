@@ -1,0 +1,47 @@
+{
+  "listen": {
+    "host": "0.0.0.0",
+    "port": 28790
+  },
+  "allow_insecure_http": true,
+  "devices": {
+    "eye-001": {
+      "secret_hex": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS"
+    }
+  },
+  "targets": {
+    "local-dev": {
+      "allowed_actions": [
+        "check_service",
+        "check_port",
+        "check_disk",
+         "check_memory",
+         "check_resources",
+        "read_service_log",
+        "restart_service"
+      ],
+      "services": {
+        "web": {
+          "unit": "nginx.service",
+          "manager": "system",
+          "restart_via_sudo": true
+        }
+      },
+      "ports": {
+        "web-http": {
+          "host": "127.0.0.1",
+          "port": 80
+        }
+      },
+      "disks": {
+        "web-data": "/srv/www"
+      }
+    }
+  },
+  "storage": {
+    "state_database": "/var/lib/velaops-proxy/state.db",
+    "audit_log": "/var/log/velaops-proxy/audit.jsonl"
+  },
+  "allowed_clock_skew_seconds": 300,
+  "max_replay_entries": 4096
+}
