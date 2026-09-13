@@ -122,7 +122,7 @@ python3 -m py_compile docs/tools/debug_event_gui.py docs/tools/llm_forwarder.py
 
 本项目在需求拆解、架构设计、HMAC 协议、状态机、Proxy 测试、ESP32-S3 真机调试、Wi-Fi 稳定性和文档整理中使用 AI Coding 工具辅助开发。所有提交日志均由组委会提供的采集器导出并通过官方 `validate-log.py` 校验。
 
-可提交的 AI Coding 对话记录位于 `logs/hanbingniao/`。当前桌面 Codex 会话未被比赛采集器导出，因此未伪造或手工补写相关日志。
+可提交的 AI Coding 对话记录位于 `logs/hanbingniao/`，内容为组委会采集器导出的原始 JSONL，并已通过官方校验。
 
 ## 安全边界
 
