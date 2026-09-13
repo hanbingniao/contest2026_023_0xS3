@@ -8,6 +8,7 @@
  ****************************************************************************/
 
 #include "velaops_autoconfig.h"
+#include "velaops_device_config.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -140,6 +141,13 @@ int velaops_autoconfig_parse_credentials(const char *content,
           velaops_autoconfig_copy_field(credentials->demo_port,
                                         sizeof(credentials->demo_port),
                                         value, value_length);
+        }
+      else if (key_length == 13 && strncmp(key, "DEVICE_SECRET", 13) == 0)
+        {
+          velaops_autoconfig_copy_field(credentials->device_secret,
+                                        sizeof(credentials->device_secret),
+                                        value, value_length);
+          credentials->has_device_secret = 1;
         }
     }
 
@@ -415,6 +423,17 @@ static int velaops_autoconfig_write_device_config(
 {
   char path[64];
   FILE *file;
+  velaops_device_config_t existing;
+
+  /* 烧录后若 /data 仍保留有效配对配置，绝不覆盖它。覆盖会把 Proxy
+   * 的随机密钥替换成旧默认值，导致 WiFi 正常但认证失败。 */
+  if (velaops_device_config_load(VELAOPS_CONFIG_FILE, &existing) ==
+      VELAOPS_CONFIG_OK)
+    {
+      velaops_device_config_clear(&existing);
+      printf("velaops autoconfig: 保留已有配对设备配置\n");
+      return 0;
+    }
 
   mkdir("/data", 0755);
   mkdir("/data/velaops", 0755);
@@ -425,6 +444,11 @@ static int velaops_autoconfig_write_device_config(
       return -1;
     }
 
+  if (!cred->has_device_secret)
+    {
+      printf("velaops autoconfig: TF 缺少 DEVICE_SECRET，拒绝写入默认密钥\n");
+      return -1;
+    }
   fprintf(file,
           "{\"schema_version\":1,\"host\":\"%s\",\"port\":\"%s\","
           "\"device_id\":\"eye-001\",\"secret\":\"%s\"}",
@@ -432,7 +456,7 @@ static int velaops_autoconfig_write_device_config(
                               : VELAOPS_AUTOCONFIG_DEFAULT_HOST,
           cred->demo_port[0] != '\0' ? cred->demo_port
                                      : VELAOPS_AUTOCONFIG_DEFAULT_PORT,
-          VELAOPS_AUTOCONFIG_DEFAULT_SECRET);
+          cred->device_secret);
   fclose(file);
   return 0;
 }
