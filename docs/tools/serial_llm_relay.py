@@ -259,6 +259,11 @@ def main() -> int:
                     continue
                 target = _target_for(request)
                 first_line = request.split(b"\r\n", 1)[0]
+                req_id = b""
+                for header_line in request.split(b"\r\n"):
+                    if header_line.lower().startswith(b"x-velaops-request-id:"):
+                        req_id = header_line.split(b":", 1)[1].strip()
+                        break
                 sys.stderr.write(
                     f"[relay] {time.strftime('%H:%M:%S')} 收妥 {len(request)}B {first_line!r} -> {target}\n")
                 sys.stderr.flush()
@@ -267,8 +272,17 @@ def main() -> int:
                 except Exception as exc:  # noqa: BLE001
                     sys.stderr.write(f"[relay] 转发失败: {exc}\n")
                     response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+                import json as _json
+                try:
+                    body = response.split(b"\r\n\r\n", 1)[1]
+                    resp_id = str(_json.loads(body).get("request_id", "")).encode()
+                except Exception:  # noqa: BLE001
+                    resp_id = b"?"
                 sys.stderr.write(
-                    f"[relay] {time.strftime('%H:%M:%S')} 响应 {len(response)}B 首行 {response.split(b'\r\n', 1)[0]!r}\n")
+                    f"[relay] {time.strftime('%H:%M:%S')} 响应 {len(response)}B "
+                    f"req_id={req_id.decode(errors='replace')} "
+                    f"resp_id={resp_id.decode(errors='replace')} "
+                    f"{'OK' if req_id == resp_id else 'MISMATCH'}\n")
                 if os.environ.get("RELAY_DUMP", "0") == "1":
                     sys.stderr.write(
                         "[relay] 响应体: " + repr(response[:1600]) + "\n")
