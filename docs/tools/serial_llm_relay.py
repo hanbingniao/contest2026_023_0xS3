@@ -85,6 +85,8 @@ def _forward(request: bytes) -> bytes:
 
 def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
     buffer = bytearray()
+    cat_active = False
+    cat_parts: list[bytes] = []
     while True:
         readable, _, _ = select.select([fd], [], [], 0.2)
         if not readable:
@@ -102,6 +104,20 @@ def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
         while b"\n" in buffer:
             raw, buffer = buffer.split(b"\n", 1)
             line = raw.strip(b"\r").strip()
+            if line == b"@@CATBEG":
+                cat_active = True
+                cat_parts = []
+                continue
+            if line == b"@@CATEND":
+                if cat_active:
+                    events.put(("CAT", b"".join(cat_parts)))
+                cat_active = False
+                continue
+            if cat_active:
+                cat_parts.append(bytes(
+                    c for c in line if c in
+                    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="))
+                continue
             marker_vf = line.find(b"@@VF ")
             marker_vc = line.find(b"@@VC ")
             if marker_vf >= 0:
@@ -141,13 +157,44 @@ def _write_nsh(fd: int, command: str) -> None:
     time.sleep(0.05)
 
 
-def _push_commands(fd: int, payload: bytes, remote: str) -> None:
-    for command in serial_push.build_commands(payload, remote):
-        for ch in command:
-            os.write(fd, ch.encode("ascii"))
-            time.sleep(0.001)
-        os.write(fd, b"\n")
-        time.sleep(0.05)
+def _push_b64(fd: int, b64: bytes, remote: str) -> None:
+    """以 base64 字面量 echo 追加写入，命令数与耗时都远小于 hex-printf。"""
+    _write_nsh(fd, f"rm -f {remote}")
+    text = b64.decode("ascii")
+    for i in range(0, len(text), 50):
+        _write_nsh(fd, f"echo '{text[i:i + 50]}' >> {remote}")
+
+
+def _read_remote(fd: int, events: "queue.Queue[tuple]", remote: str,
+                 timeout: float = 3.0) -> bytes:
+    """回读远端文件内容（base64 行之间由 reader 以 @@CATBEG/@@CATEND 圈定）。"""
+    _write_nsh(fd, "echo @@CATBEG")
+    _write_nsh(fd, f"cat {remote}")
+    _write_nsh(fd, "echo @@CATEND")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            event = events.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        if event[0] == "CAT":
+            return event[1]
+    return b""
+
+
+def _push_b64_verified(fd: int, events: "queue.Queue[tuple]", b64: bytes,
+                       remote: str) -> bool:
+    """写入后回读比对；NSH 写坏时重推，最多 3 轮。"""
+    text = b64.decode("ascii")
+    for _ in range(3):
+        _push_b64(fd, b64, remote)
+        got = b"".join(_read_remote(fd, events, remote).split()).decode(
+            "ascii", "ignore")
+        if got == text:
+            return True
+        sys.stderr.write("[relay] 回读不一致，重推响应\n")
+        sys.stderr.flush()
+    return False
 
 
 def main() -> int:
@@ -220,10 +267,14 @@ def main() -> int:
                     f"[relay] 响应 {len(response)}B 首行 {response.split(b'\r\n', 1)[0]!r}\n")
                 if os.environ.get("RELAY_DUMP", "0") == "1":
                     sys.stderr.write(
-                        "[relay] 响应体: " + repr(response[:400]) + "\n")
+                        "[relay] 响应体: " + repr(response[:1600]) + "\n")
                 sys.stderr.flush()
-                _push_commands(fd, base64.b64encode(response) + b"\n", B64_REMOTE)
-                _write_nsh(fd, f"echo x > {READY_REMOTE}")
+                verified = _push_b64_verified(
+                    fd, events, base64.b64encode(response), B64_REMOTE)
+                if verified:
+                    _write_nsh(fd, f"echo x > {READY_REMOTE}")
+                else:
+                    sys.stderr.write("[relay] 响应回写校验失败，跳过本次响应\n")
                 sys.stderr.write(f"[relay] 已回写响应 {len(response)} 字节\n")
                 sys.stderr.flush()
             else:

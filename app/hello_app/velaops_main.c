@@ -340,6 +340,7 @@ static int velaops_post_request(const char *target, const char *body,
                                   (int64_t)time(NULL), &snapshot) !=
           VELAOPS_HEALTH_OK)
         {
+          fprintf(stderr, "velaops: 资源解析/健康校验失败\n");
           display_state->online = 0;
           goto cleanup;
         }
