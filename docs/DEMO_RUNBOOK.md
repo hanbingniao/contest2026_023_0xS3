@@ -1,6 +1,10 @@
 # VelaOps 局域网资源看板演示手册
 
 > 验证日期：2026-08-31。本文是当前 Demo 的唯一启动口径。
+>
+> 传输说明：ESP32-S3 的 WiFi 在 NuttX 下不稳定，比赛演示默认走 **USB 串口隧道**
+> （有线），设备侧业务 HTTP 全部经开发机 relay 转发。设计与开关见
+> `docs/SERIAL_TRANSPORT.md`；`TRANSPORT=wifi` 可一键切回 WiFi 直连。
 
 ## 1. 当前闭环
 
@@ -21,8 +25,12 @@ LLM 不能传入主机、Action 或 shell 参数，也不能直接执行变更�
 
 ## 2. 开发机启动
 
-开发机重启会清空 `/tmp`。若配置不存在，先恢复本地私密环境文件权限，再成对生成
-Proxy/设备配置（脚本不输出密钥）：
+演示栈（Proxy / 局域网 NTP / MiMo 转发器 / 演示目标）以 **user-systemd** 服务常驻，
+并已开启 linger，开发机重启或注销后会自动拉起，密钥目录也改用持久化的
+`$HOME/.local/state/velaops-live/`（不再依赖会被清空的 `/tmp`）。
+
+若配置不存在，先恢复本地私密环境文件权限，再成对生成 Proxy/设备配置（脚本不输出
+密钥）：
 
 ```bash
 chmod 600 .velaops.local.env
@@ -32,38 +40,42 @@ python3 docs/tools/prepare_live_demo.py --host 192.168.71.90
 脚本默认拒绝覆盖已有配置，避免设备与 Proxy 的 HMAC 密钥被意外轮换。只有明确需要
 重新配对时才使用 `--force`；轮换后必须重新执行第 3 节的设备配置下发。
 
-启动无特权的 user-systemd 演示目标服务。它只监听开发机回环地址 `28791`，与
-监听 `28790` 的 Proxy 相互独立，因此后续可以安全演示“目标故障 → Proxy 仍在线”：
+随后确认配置存在、权限为 `0600`，并确认四个服务在线：
 
 ```bash
-python3 docs/tools/manage_demo_target.py start
+test -f $HOME/.local/state/velaops-live/proxy.json
+test -f $HOME/.local/state/velaops-live/device-config.json
+stat -c '%a %n' $HOME/.local/state/velaops-live/{proxy.json,device-config.json}
+
+systemctl --user enable --now \
+  velaops-proxy.service velaops-lan-ntp.service \
+  velaops-llm-forwarder.service velaops-demo-target.service
+systemctl --user is-active \
+  velaops-proxy velaops-lan-ntp velaops-llm-forwarder velaops-demo-target
+```
+
+演示目标只监听开发机回环地址 `28791`，与监听 `28790` 的 Proxy 相互独立，因此
+后续可以安全演示“目标故障 → Proxy 仍在线”。需要制造故障时停止目标服务，不要
+停止 Proxy：
+
+```bash
+systemctl --user stop velaops-demo-target.service   # 制造故障
+systemctl --user start velaops-demo-target.service  # 恢复
 curl --fail http://127.0.0.1:28791/
 ```
 
-若配置是本功能加入前生成的、目录中没有 unit 文件，需明确执行一次 `--force` 重新
-配对，然后重新下发设备配置；不要手工改一边配置造成 HMAC 密钥不一致。
+若 unit 由旧脚本手工创建、路径仍指向 `/tmp`，用 `systemctl --user cat <unit>` 核对
+`ExecStart` 后改为 `$HOME/.local/state/velaops-live/proxy.json`；不要手工改一边配置
+造成 HMAC 密钥不一致。
 
-随后确认临时私密配置存在且权限为 `0600`：
-
-```bash
-test -f /tmp/opencode/velaops-live/proxy.json
-test -f /tmp/opencode/velaops-live/device-config.json
-stat -c '%a %n' /tmp/opencode/velaops-live/{proxy.json,device-config.json}
-```
-
-终端 A 启动普通用户可运行的局域网时间服务：
+不使用 systemd 时也可在前台手动启动（终端 A 局域网 NTP，终端 B Proxy）：
 
 ```bash
 cd /home/lu/桌面/openvela/contest2026_023_0xS3
 PYTHONPATH=proxy/src python3 -m velaops_proxy.lan_ntp --port 40123
-```
 
-终端 B 启动 HTTP Proxy：
-
-```bash
-cd /home/lu/桌面/openvela/contest2026_023_0xS3
 PYTHONPATH=proxy/src python3 -m velaops_proxy \
-  --config /tmp/opencode/velaops-live/proxy.json
+  --config $HOME/.local/state/velaops-live/proxy.json
 ```
 
 另一个终端验证服务：
@@ -85,11 +97,10 @@ Proxy 配置监听局域网时必须显式包含：
 需要制造可恢复故障时，只停止独立目标，不要停止 Proxy：
 
 ```bash
-python3 docs/tools/manage_demo_target.py stop
+systemctl --user stop velaops-demo-target.service
 ```
 
-重新准备正常演示环境时可再次运行 `manage_demo_target.py start`。脚本只操作固定的
-`velaops-demo-target.service`，不需要 root 或 sudo。
+重新准备正常演示环境时再启动即可；该单元不需要 root 或 sudo。
 
 ## 3. 板端启动
 
@@ -109,7 +120,7 @@ ifconfig wlan0
 ```bash
 python3 docs/tools/send_raw.py 'mkdir /data/velaops'
 python3 docs/tools/serial_push.py \
-  /tmp/opencode/velaops-live/device-config.json \
+  $HOME/.local/state/velaops-live/device-config.json \
   /data/velaops/config.json
 python3 docs/tools/send_raw.py 'velaops auth-check'
 ```
@@ -207,7 +218,7 @@ Proxy 恢复后再次执行即可恢复真实诊断，无需重启设备。
 停止独立目标制造 critical，Proxy 必须保持在线：
 
 ```bash
-python3 docs/tools/manage_demo_target.py stop
+systemctl --user stop velaops-demo-target.service
 ```
 
 Agent 已经给出针对 `demo` 的 critical + `restart_service` 建议后，再明确请求修复。
@@ -259,8 +270,9 @@ PORT=/dev/ttyACM0 python3 docs/tools/debug_event_gui.py
 
 ## 7. 已知限制
 
-- `/data` 当前为 tmpfs，烧录或断电后设备配置会丢失；Wi-Fi 也需重新连接。
-- 临时 Proxy 凭据位于 `/tmp/opencode/velaops-live/`，重启开发机后可能需要重建。
+- `/data` 当前为 tmpfs，烧录或断电后设备配置会丢失；开机由 TF 卡自动配置恢复。
+- Proxy/设备配对凭据位于持久的 `$HOME/.local/state/velaops-live/`，开发机重启不会
+  丢失；只有显式 `--force` 才会轮换密钥。
 - 演示目标是一次性 Python HTTP 服务，仅用于验证白名单重启和端口复核，不代表
   生产服务本身。
 - HTTP 只适用于比赛 Demo 的可信局域网，不用于公网或生产部署。
@@ -268,8 +280,13 @@ PORT=/dev/ttyACM0 python3 docs/tools/debug_event_gui.py
   `192.168.71.90:40123`。
 - MiMo 是当前唯一 LLM 后端；公网 TLS 或服务端不稳定时，Agent 安全返回超时，
   不影响本地看板和 Proxy，也不会执行变更。
-- WiFi 存在“新鲜窗口”现象：复位后前 1~3 次 LLM 调用健康，之后链路可能劣化（巡检持续
-  `transport_error`、整机静默），只能硬复位后重做本节步骤恢复；单次闭环演示不受影响。
+- 曾出现“新鲜窗口”掉线：复位后看板巡检与 ai_agent 网络服务几乎同时发起首个请求，
+  数秒内会打断 ESP32-S3 的关联（表现为持续 `transport_error`、收发计数全零）。现已
+  在设备端修复：看板延迟 20s 再开始巡检，避开 Agent 建链窗口。看板侧只诊断、不主动
+  改接口——实测运行期 `renew wlan0`、`ifdown/ifup`、`wapi disconnect + essid` 在
+  ai_agent 同时运行时都可能连带打断正常链路甚至整机静默。真掉线时用
+  `velaops net-check` 复核，仍不通则重新上电，由开机自动配置重建链路；开机凭据会
+  缓存到 `/data/velaops/wifi.txt` 供诊断。
 - 含中文的命令必须用 `send_slow.py` 逐字符发送，快发打散会导致 MiMo 报 400。
 - SIMPLE 复杂度回复存在 LLM 缓存，复测同一请求必须换措辞，否则会回放旧结果。
 
@@ -309,3 +326,8 @@ PORT=/dev/ttyACM0 python3 docs/tools/debug_event_gui.py
 - **DEBUG 弹窗联调闭环已真机验收（2026-08-31）**：联调控制台一键触发后，模型 10s 内
   直接调用 `velaops_show_message`（未绕道巡检），LCD 弹出提示框，中文回复测试正常，
   短按 BOOT 消除后看板继续 5s 刷新；屏显/监控双线程后台取证零日志刷屏。
+- **Wi-Fi 稳定性修复已真机验收（2026-09-15）**：定位到看板首个巡检请求与 ai_agent
+  网络服务建链竞态会让 ESP32-S3 数秒内掉线。加入 20s 巡检启动延迟、并移除运行期
+  主动改接口的自愈后，同一条只读链路上 `ai_agent + 屏显看板` 连续运行 12 分钟、
+  139 次 5 秒巡检全部成功，Proxy 审计 140 条请求平均间隔 5.30s、零错误、零自愈
+  （`transport_error=0`）；此前多轮 5~8 分钟测试同样零错误。

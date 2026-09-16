@@ -9,6 +9,7 @@
 
 #include "velaops_autoconfig.h"
 #include "velaops_device_config.h"
+#include "velaops_serial_tunnel.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -149,16 +150,29 @@ int velaops_autoconfig_parse_credentials(const char *content,
                                         value, value_length);
           credentials->has_device_secret = 1;
         }
+      else if (key_length == 9 && strncmp(key, "TRANSPORT", 9) == 0)
+        {
+          velaops_autoconfig_copy_field(credentials->transport,
+                                        sizeof(credentials->transport),
+                                        value, value_length);
+        }
     }
 
-  /* KEY 已在长度与内容双重比对后写入，无值视为未配置。 */
-  if (credentials->wifi_ssid[0] == '\0' ||
-      credentials->wifi_password[0] == '\0')
+  /* 串口模式不依赖 WiFi，允许缺省 WiFi 凭据；WiFi 模式必须齐全。 */
+  if (!velaops_credentials_use_serial(credentials) &&
+      (credentials->wifi_ssid[0] == '\0' ||
+       credentials->wifi_password[0] == '\0'))
     {
       return -1;
     }
 
   return 0;
+}
+
+int velaops_credentials_use_serial(const velaops_credentials_t *credentials)
+{
+  return credentials != NULL &&
+         strcmp(credentials->transport, VELAOPS_TRANSPORT_SERIAL) == 0;
 }
 
 #ifdef __NuttX__
@@ -170,6 +184,7 @@ int velaops_autoconfig_parse_credentials(const char *content,
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <syslog.h>
 #include <unistd.h>
 
 #include <nuttx/kmalloc.h>
@@ -240,6 +255,9 @@ static int velaops_autoconfig_mount_tf(void)
   int attempt;
   size_t index;
 
+  /* 根目录不一定带 /mnt（实测复位后可能缺失），挂载点必须先显式建出来，
+   * 否则 mount 会因 ENOENT 直接失败，设备将无法从 TF 卡自动配置。 */
+  mkdir("/mnt", 0755);
   mkdir(VELAOPS_AUTOCONFIG_MOUNT, 0755);
 
   /* 手动重跑时卡可能已挂载：mount 会 EBUSY，但凭据文件可读即可继续。 */
@@ -254,12 +272,17 @@ static int velaops_autoconfig_mount_tf(void)
       }
   }
 
-  for (attempt = 0; attempt < 6; attempt++)
+  /* 软复位不会给 SD 卡断电，控制器/卡状态偶发未就绪，mount 会连续失败；
+   * 实测硬复位后需要等十几秒到几十秒才能恢复，所以多轮重试而不是只试 6 次。
+   * 每次重试前清掉可能的残留挂载，避免上一次失败留下的半挂载状态。 */
+  for (attempt = 0; attempt < 20; attempt++)
     {
+      (void)umount(VELAOPS_AUTOCONFIG_MOUNT);
+
       for (index = 0; index < 2; index++)
         {
           if (mount(devices[index], VELAOPS_AUTOCONFIG_MOUNT,
-                    "vfat", 0, NULL) == 0)
+                    "vfat", 0, NULL) == 0 || errno == EBUSY)
             {
               printf("velaops autoconfig: TF 已挂载 %s\n", devices[index]);
               return 0;
@@ -269,6 +292,7 @@ static int velaops_autoconfig_mount_tf(void)
       sleep(2);
     }
 
+  printf("velaops autoconfig: TF 挂载失败（已重试 20 次）\n");
   return -ENOENT;
 }
 
@@ -307,6 +331,27 @@ static int velaops_autoconfig_read_credentials(velaops_credentials_t *cred)
 
   fclose(file);
   return result;
+}
+
+/* SD 读取偶发失败会让整个自启链路失效；有限次重试覆盖驱动瞬时抖动。
+ * 每次重试前重新触发一次挂载探测，避免首次挂载后的短暂不可读。 */
+static int velaops_autoconfig_read_credentials_retry(
+    velaops_credentials_t *cred)
+{
+  int attempt;
+
+  for (attempt = 0; attempt < 3; attempt++)
+    {
+      if (velaops_autoconfig_read_credentials(cred) == 0)
+        {
+          return 0;
+        }
+
+      printf("velaops autoconfig: 凭据读取失败，重试 (%d/3)\n", attempt + 1);
+      sleep(2);
+    }
+
+  return -1;
 }
 
 static int velaops_autoconfig_connect_wifi(const velaops_credentials_t *cred)
@@ -449,14 +494,26 @@ static int velaops_autoconfig_write_device_config(
       printf("velaops autoconfig: TF 缺少 DEVICE_SECRET，拒绝写入默认密钥\n");
       return -1;
     }
-  fprintf(file,
-          "{\"schema_version\":1,\"host\":\"%s\",\"port\":\"%s\","
-          "\"device_id\":\"eye-001\",\"secret\":\"%s\"}",
-          cred->has_demo_host ? cred->demo_host
-                              : VELAOPS_AUTOCONFIG_DEFAULT_HOST,
-          cred->demo_port[0] != '\0' ? cred->demo_port
-                                     : VELAOPS_AUTOCONFIG_DEFAULT_PORT,
-          cred->device_secret);
+
+  if (velaops_credentials_use_serial(cred))
+    {
+      fprintf(file,
+              "{\"schema_version\":1,\"host\":\"" VELAOPS_TUNNEL_HOST
+              "\",\"port\":\"" VELAOPS_TUNNEL_PORT_STR "\","
+              "\"device_id\":\"eye-001\",\"secret\":\"%s\"}",
+              cred->device_secret);
+    }
+  else
+    {
+      fprintf(file,
+              "{\"schema_version\":1,\"host\":\"%s\",\"port\":\"%s\","
+              "\"device_id\":\"eye-001\",\"secret\":\"%s\"}",
+              cred->has_demo_host ? cred->demo_host
+                                  : VELAOPS_AUTOCONFIG_DEFAULT_HOST,
+              cred->demo_port[0] != '\0' ? cred->demo_port
+                                         : VELAOPS_AUTOCONFIG_DEFAULT_PORT,
+              cred->device_secret);
+    }
   fclose(file);
   return 0;
 }
@@ -484,18 +541,34 @@ static int velaops_autoconfig_write_agent_router(
       return -1;
     }
 
-  fprintf(file,
-          "{\"llm_backend_0\":\"{\\\"host\\\":\\\"%s\\\","
-          "\\\"path\\\":\\\"/v1/chat/completions\\\",\\\"port\\\":"
-          "\\\"%s\\\",\\\"api_key\\\":\\\"%s\\\",\\\"model\\\":"
-          "\\\"mimo-v2.5\\\",\\\"priority\\\":0,\\\"cost_tier\\\":1}\"}",
-          cred->has_demo_host && cred->demo_host[0] != '\0'
-              ? cred->demo_host
-              : "api.xiaomimimo.com",
-          cred->has_demo_host && cred->demo_host[0] != '\0' ? "28792" : "443",
-          cred->api_key);
+  if (velaops_credentials_use_serial(cred))
+    {
+      fprintf(file,
+              "{\"llm_backend_0\":\"{\\\"host\\\":\\\"" VELAOPS_TUNNEL_HOST
+              "\\\",\\\"path\\\":\\\"/v1/chat/completions\\\",\\\"port\\\":"
+              "\\\"" VELAOPS_TUNNEL_PORT_STR "\\\",\\\"api_key\\\":\\\"%s\\\","
+              "\\\"model\\\":\\\"mimo-v2.5\\\",\\\"priority\\\":0,"
+              "\\\"cost_tier\\\":1}\"}",
+              cred->api_key);
+      printf("velaops autoconfig: Agent 路由已预写串口隧道 %s:%s\n",
+             VELAOPS_TUNNEL_HOST, VELAOPS_TUNNEL_PORT_STR);
+    }
+  else
+    {
+      fprintf(file,
+              "{\"llm_backend_0\":\"{\\\"host\\\":\\\"%s\\\","
+              "\\\"path\\\":\\\"/v1/chat/completions\\\",\\\"port\\\":"
+              "\\\"%s\\\",\\\"api_key\\\":\\\"%s\\\",\\\"model\\\":"
+              "\\\"mimo-v2.5\\\",\\\"priority\\\":0,\\\"cost_tier\\\":1}\"}",
+              cred->has_demo_host && cred->demo_host[0] != '\0'
+                  ? cred->demo_host
+                  : "api.xiaomimimo.com",
+              cred->has_demo_host && cred->demo_host[0] != '\0' ? "28792"
+                                                                 : "443",
+              cred->api_key);
+      printf("velaops autoconfig: Agent 路由已预写 WiFi 直连\n");
+    }
   fclose(file);
-  printf("velaops autoconfig: Agent 路由已预写 mimo\n");
   return 0;
 }
 
@@ -542,6 +615,7 @@ static void velaops_autoconfig_install_demo_skill(void)
 int velaops_autoconfig_run(int verbose)
 {
   velaops_credentials_t credentials;
+  int serial;
   int status;
 
   (void)verbose;
@@ -555,20 +629,55 @@ int velaops_autoconfig_run(int verbose)
       return status;
     }
 
-  status = velaops_autoconfig_read_credentials(&credentials);
+  status = velaops_autoconfig_read_credentials_retry(&credentials);
   if (status != 0)
     {
       printf("velaops autoconfig: 凭据文件缺失或格式错误，退出\n");
       return status;
     }
 
-  printf("velaops autoconfig: 凭据读取成功，开始连接 WiFi %s\n",
-         credentials.wifi_ssid);
-  status = velaops_autoconfig_connect_wifi(&credentials);
-  if (status != 0)
+  serial = velaops_credentials_use_serial(&credentials);
+  printf("velaops autoconfig: 传输模式=%s\n",
+         serial ? "serial(USB 串口隧道)" : "wifi(设备直连)");
+
+  if (serial)
     {
-      printf("velaops autoconfig: WiFi 连接失败，退出自动配置（可手动配置）\n");
-      return status;
+      /* 串口隧道用控制台传 base64 帧，其它 INFO 日志会插进帧里导致解码失败；
+       * 串口模式只保留 ERROR，保证帧干净。 */
+      setlogmask(LOG_UPTO(LOG_ERR));
+    }
+
+  if (serial)
+    {
+      /* 隧道必须先于任何业务请求就绪。 */
+      extern int velaops_main(int argc, char *argv[]);
+      static char *const velaops_tunnel_argv[] = { "tunnel", NULL };
+      int tunnel_pid = velaops_spawn_with_stack(velaops_main, "velaops-tun",
+                                                velaops_tunnel_argv, 32768);
+
+      if (tunnel_pid < 0)
+        {
+          printf("velaops autoconfig: 串口隧道启动失败 (%d)\n", tunnel_pid);
+          return -1;
+        }
+      printf("velaops autoconfig: 串口隧道已启动 pid=%d\n", tunnel_pid);
+
+      /* WiFi 只用于 NTP，连不上也不影响隧道业务。 */
+      printf("velaops autoconfig: 尝试连接 WiFi %s（失败可继续）\n",
+             credentials.wifi_ssid);
+      if (velaops_autoconfig_connect_wifi(&credentials) != 0)
+        {
+          printf("velaops autoconfig: WiFi 未连上，继续串口模式\n");
+        }
+    }
+  else
+    {
+      printf("velaops autoconfig: 开始连接 WiFi %s\n", credentials.wifi_ssid);
+      if (velaops_autoconfig_connect_wifi(&credentials) != 0)
+        {
+          printf("velaops autoconfig: WiFi 连接失败，退出自动配置\n");
+          return -1;
+        }
     }
 
   if (velaops_autoconfig_write_device_config(&credentials) != 0)
@@ -577,8 +686,13 @@ int velaops_autoconfig_run(int verbose)
       return -1;
     }
 
-  /* 冷启动后链路偶发假活掉线，首次认证可能失败；重试最多 10 分钟，
-   * 避免一次网络抖动就让整条自启链路（agent + 看板）永远不拉起。 */
+  if (velaops_autoconfig_write_agent_router(&credentials) != 0)
+    {
+      printf("velaops autoconfig: Agent 路由预写失败，退出自动配置（可手动配置）\n");
+      return -1;
+    }
+
+  /* 认证重试：WiFi 模式补一次 DHCP 续租；串口模式无需碰接口。 */
   {
     int auth_attempt;
     int auth_status = -1;
@@ -593,7 +707,10 @@ int velaops_autoconfig_run(int verbose)
 
         printf("velaops autoconfig: 认证失败，15s 后重试 (%d/40)\n",
                auth_attempt + 1);
-        system("renew wlan0");
+        if (!serial)
+          {
+            system("renew wlan0");
+          }
         sleep(15);
       }
 
@@ -603,12 +720,6 @@ int velaops_autoconfig_run(int verbose)
         return -1;
       }
   }
-
-  if (velaops_autoconfig_write_agent_router(&credentials) != 0)
-    {
-      printf("velaops autoconfig: Agent 路由预写失败，退出自动配置（可手动配置）\n");
-      return -1;
-    }
 
   velaops_autoconfig_install_demo_skill();
 

@@ -37,5 +37,6 @@ CSRCS += src/velaops_proxy_http_transport.c
 CSRCS += src/velaops_dashboard.c
 CSRCS += src/velaops_display.c
 CSRCS += src/velaops_screen.c
+CSRCS += src/velaops_serial_tunnel.c
 
 include $(APPDIR)/Application.mk

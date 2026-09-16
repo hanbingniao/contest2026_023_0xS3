@@ -249,3 +249,26 @@ AI 只读诊断、主动触发、实体批准和设备侧复核已形成可演�
    巡检与 LLM 调用的并发节流、mbedtls 会话复用。
 3. 实现 Incident tracker 的版本化、原子持久化，避免重启后重放不确定事件。
 4. 修复上游 `quit` 后 Provider 丢失的注册表清理问题（当前靠不 quit 规避）。
+
+## 8. 2026-09-16：WiFi 稳定性排查结论与串口传输
+
+### 排查结论
+
+- 通过“看板单独跑 / agent 单独跑 / 两者同跑”的对照实验，确认 ESP32-S3 的
+  WiFi 会在以下场景掉线（`reason=8`，之后重连不回来，只能重新上电）：
+  1. 复位后看板首个请求与 ai_agent 建链并发（20s 启动延迟可缓解）；
+  2. 任何 ~10-20KB 的 LLM 请求（家用路由器同样复现，排除 AP 因素）。
+- 应用层做过的缓解均已验证收益有限：请求裁剪、分块发送、全局网络锁、驱动断开
+  必重连。结论是 NuttX + esp32s3 WiFi 驱动层问题。
+- 期间对上游 `nuttx`/`packages/ai_agent` 的临时改动已全部回退；队伍仓之外只保留
+  既有的 `patches/nuttx`、`patches/vendor`。新增 `patches/nuttx/0002`（SDMMC 关闭
+  DMA 的 Kconfig）以补齐此前未入 patch 的上游改动。
+
+### 当前交付：串口隧道（有线）
+
+- 设备侧业务 HTTP 全部指向 `127.0.0.1:18080`，由 `velaops tunnel` 帧化经 USB 串口
+  发给开发机 `serial_llm_relay.py`，按路径转发到本机 Proxy/LLM 转发器。
+- 传输层与业务解耦：凭据 `TRANSPORT=serial|wifi` 一键切换，代码不改。
+- 已知遗留：单串口被日志与帧复用，偶发插帧会让 relay 丢帧；未做重发（会触发
+  Proxy 的 `replay_detected`）。详见 `docs/SERIAL_TRANSPORT.md`。
+- 交接文档：`docs/SERIAL_TRANSPORT.md`（设计/开关/准备/已知问题/切回 WiFi）。

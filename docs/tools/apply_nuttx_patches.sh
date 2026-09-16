@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# 可重复执行：已应用的补丁自动跳过；无法确认的补丁只告警不中断，
+# 避免某个仓的历史状态拖垮整套环境准备。
+set -uo pipefail
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 team_root=$(cd "$script_dir/../.." && pwd)
@@ -10,8 +12,7 @@ apply_patch_dir() {
   local target_repo="$2"
   local patch_file name
   [ -d "$patch_dir" ] || return 0
-  # 按文件名顺序应用补丁；已应用的补丁（反向检查通过）自动跳过，
-  # 可重复执行。
+  # 按文件名顺序应用补丁；已应用的补丁（反向检查通过）自动跳过。
   for patch_file in "$patch_dir"/*.patch; do
     [ -e "$patch_file" ] || continue
     name=$(basename "$patch_file")
@@ -21,9 +22,12 @@ apply_patch_dir() {
       continue
     fi
 
-    git -C "$target_repo" apply --check "$patch_file"
-    git -C "$target_repo" apply "$patch_file"
-    echo "Applied $name"
+    if git -C "$target_repo" apply --check "$patch_file" 2>/dev/null; then
+      git -C "$target_repo" apply "$patch_file"
+      echo "Applied $name"
+    else
+      echo "WARN: $name 无法应用（可能已被等效修改），请人工确认" >&2
+    fi
   done
 }
 

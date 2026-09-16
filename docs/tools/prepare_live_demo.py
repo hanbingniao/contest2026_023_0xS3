@@ -12,7 +12,9 @@ import tempfile
 from typing import Any
 
 
-DEFAULT_DIRECTORY = Path("/tmp/opencode/velaops-live")
+# 与 user-systemd 服务使用的持久目录保持一致：/tmp 会在开发机重启时被清空，
+# 若生成到 /tmp 而服务仍读旧目录，设备与 Proxy 的配对密钥就会不一致而认证失败。
+DEFAULT_DIRECTORY = Path.home() / ".local/state/velaops-live"
 DEFAULT_PORT = 28790
 DEFAULT_TARGET_PORT = 28791
 DEVICE_ID = "eye-001"
