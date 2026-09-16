@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,30 +23,54 @@
 
 #define VELAOPS_TUNNEL_IN_B64 "/tmp/vop-in.b64"
 #define VELAOPS_TUNNEL_IN_READY "/tmp/vop-in.ready"
+#define VELAOPS_TUNNEL_ACK "/tmp/vop-ack"
+#define VELAOPS_TUNNEL_NACK "/tmp/vop-nack"
 #define VELAOPS_TUNNEL_REQ_MAX (64 * 1024)
 #define VELAOPS_TUNNEL_RESP_MAX (256 * 1024)
-/* 发帧后等待 relay 响应的秒数；不重发（重发会被 Proxy 判为 replay_detected）。 */
-#define VELAOPS_TUNNEL_WAIT_SECONDS 12
-#define VELAOPS_TUNNEL_EMIT_ATTEMPTS 1
+
+/* 单路 USB CDC 半双工复用：请求切成带序号和 CRC 的小块，relay 缺块回 NACK，
+ * 板端只重发缺块，因此日志偶发插帧也能自愈；请求被 relay 完整收下后回 ACK，
+ * 板端随即停止重发、只等响应。 */
+#define VELAOPS_TUNNEL_CHUNK 120
+#define VELAOPS_TUNNEL_MAX_ROUNDS 6
+#define VELAOPS_TUNNEL_ROUND_WAIT_MS 1500
+#define VELAOPS_TUNNEL_FAST_READY_MS 12000
+#define VELAOPS_TUNNEL_LLM_READY_MS 120000
 
 static const char g_b64[] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static int g_tunnel_xid;
 
-/* 输出 base64 帧；一帧一次 write，尽量降低与日志交错导致的断行。 */
-static int velaops_tunnel_emit(const char *data, size_t len)
+static uint16_t velaops_tunnel_crc16(const char *data, size_t len)
 {
-  size_t out_cap = 4 * ((len + 2) / 3) + 64;
-  char *out = malloc(out_cap);
+  uint16_t crc = 0xffff;
+  size_t i;
+  int bit;
+
+  for (i = 0; i < len; i++)
+    {
+      crc ^= (uint8_t)data[i];
+      for (bit = 0; bit < 8; bit++)
+        {
+          crc = (crc & 1) ? (uint16_t)((crc >> 1) ^ 0x8408)
+                          : (uint16_t)(crc >> 1);
+        }
+    }
+  return crc;
+}
+
+/* base64 编码到新分配字符串；失败返回 NULL。 */
+static char *velaops_tunnel_b64_encode(const char *data, size_t len)
+{
+  size_t cap = 4 * ((len + 2) / 3) + 1;
+  char *out = malloc(cap);
   size_t i;
   size_t o = 0;
 
   if (out == NULL)
     {
-      return -1;
+      return NULL;
     }
-
-  /* 单行整帧：前置换行先收尾其它线程可能未换行的日志，再一次 write 发出。 */
-  o += (size_t)snprintf(out + o, out_cap - o, "\n@@VOPREQ ");
   for (i = 0; i < len; i += 3)
     {
       unsigned int v = (unsigned int)(unsigned char)data[i] << 16;
@@ -63,15 +89,104 @@ static int velaops_tunnel_emit(const char *data, size_t len)
       out[o++] = i + 1 < len ? g_b64[(v >> 6) & 0x3f] : '=';
       out[o++] = i + 2 < len ? g_b64[v & 0x3f] : '=';
     }
-  out[o++] = '\n';
+  out[o] = '\0';
+  return out;
+}
 
-  if (write(STDOUT_FILENO, out, o) != (ssize_t)o)
+/* 发送帧头（仅首轮）与需要发送的分块（missing==NULL 表示全部）。 */
+static int velaops_tunnel_send(int xid, const char *b64, size_t b64len,
+                               int nchunks, int with_header,
+                               const bool *missing)
+{
+  int seq;
+
+  if (with_header)
     {
-      free(out);
+      char header[64];
+      int hlen = snprintf(header, sizeof(header), "\n@@VF %d %d %u\n",
+                          xid, nchunks, (unsigned int)b64len);
+
+      if (hlen < 0 || (size_t)hlen >= sizeof(header) ||
+          write(STDOUT_FILENO, header, (size_t)hlen) != (ssize_t)hlen)
+        {
+          return -1;
+        }
+    }
+
+  for (seq = 0; seq < nchunks; seq++)
+    {
+      size_t offset;
+      size_t chunk_len;
+      uint16_t crc;
+      char line[VELAOPS_TUNNEL_CHUNK + 48];
+      int line_len;
+
+      if (missing != NULL && !missing[seq])
+        {
+          continue;
+        }
+
+      offset = (size_t)seq * VELAOPS_TUNNEL_CHUNK;
+      chunk_len = b64len - offset;
+      if (chunk_len > VELAOPS_TUNNEL_CHUNK)
+        {
+          chunk_len = VELAOPS_TUNNEL_CHUNK;
+        }
+      crc = velaops_tunnel_crc16(b64 + offset, chunk_len);
+      line_len = snprintf(line, sizeof(line), "@@VC %d %d %04x %.*s\n",
+                          xid, seq, (unsigned int)crc, (int)chunk_len,
+                          b64 + offset);
+      if (line_len < 0 || (size_t)line_len >= sizeof(line) ||
+          write(STDOUT_FILENO, line, (size_t)line_len) != (ssize_t)line_len)
+        {
+          return -1;
+        }
+    }
+  return 0;
+}
+
+/* 读取 relay 的 NACK（缺失序号列表，空格/逗号分隔），返回缺失块数。 */
+static int velaops_tunnel_read_nack(bool *missing, int nchunks)
+{
+  char buffer[1024];
+  FILE *file;
+  size_t length;
+  char *cursor;
+  int count = 0;
+
+  file = fopen(VELAOPS_TUNNEL_NACK, "r");
+  if (file == NULL)
+    {
       return -1;
     }
-  free(out);
-  return 0;
+  length = fread(buffer, 1, sizeof(buffer) - 1, file);
+  buffer[length] = '\0';
+  fclose(file);
+  unlink(VELAOPS_TUNNEL_NACK);
+
+  memset(missing, 0, (size_t)nchunks);
+  cursor = buffer;
+  while (*cursor != '\0')
+    {
+      char *end;
+      long value = strtol(cursor, &end, 10);
+
+      if (end == cursor)
+        {
+          break;
+        }
+      cursor = end;
+      if (value >= 0 && value < nchunks)
+        {
+          missing[value] = true;
+          count++;
+        }
+      while (*cursor == ',' || *cursor == ' ' || *cursor == '\n')
+        {
+          cursor++;
+        }
+    }
+  return count;
 }
 
 static int velaops_tunnel_b64_value(char c)
@@ -315,7 +430,6 @@ int velaops_serial_tunnel_run(void)
       char *response = NULL;
       ssize_t response_len;
       int waited;
-      int i;
 
       if (client < 0)
         {
@@ -334,32 +448,115 @@ int velaops_serial_tunnel_run(void)
           continue;
         }
 
-      /* 发帧并等响应：控制台偶发插帧会让 relay 丢请求，重发最多 3 次。 */
+      /* 分块发送 + ACK/NACK 自愈；请求类型决定等待响应的时长。 */
       waited = 0;
       {
+        int is_llm = strstr(request, "/v1/chat/completions") != NULL;
+        char *b64 = velaops_tunnel_b64_encode(request, request_len);
+        size_t b64len;
+        int nchunks;
+        bool *missing;
+        int xid;
         int attempt;
+        int acked = 0;
 
-        for (attempt = 0;
-             attempt < VELAOPS_TUNNEL_EMIT_ATTEMPTS && !waited; attempt++)
+        free(request);
+        request = NULL;
+
+        if (b64 == NULL)
           {
-            unlink(VELAOPS_TUNNEL_IN_READY);
-            if (velaops_tunnel_emit(request, request_len) != 0)
+            velaops_tunnel_send_error(client);
+            close(client);
+            continue;
+          }
+        b64len = strlen(b64);
+        nchunks = (int)((b64len + VELAOPS_TUNNEL_CHUNK - 1) /
+                        VELAOPS_TUNNEL_CHUNK);
+        if (nchunks < 1)
+          {
+            nchunks = 1;
+          }
+        missing = malloc((size_t)nchunks);
+        if (missing == NULL)
+          {
+            free(b64);
+            velaops_tunnel_send_error(client);
+            close(client);
+            continue;
+          }
+
+        xid = ++g_tunnel_xid;
+        /* 关键：清掉上一轮的响应/就绪位，否则会读到旧响应（request_id 不符）。 */
+        unlink(VELAOPS_TUNNEL_IN_READY);
+        unlink(VELAOPS_TUNNEL_IN_B64);
+        for (attempt = 0;
+             attempt < VELAOPS_TUNNEL_MAX_ROUNDS && !acked; attempt++)
+          {
+            bool first = (attempt == 0);
+            int ms;
+
+            unlink(VELAOPS_TUNNEL_ACK);
+            unlink(VELAOPS_TUNNEL_NACK);
+            if (velaops_tunnel_send(xid, b64, b64len, nchunks, first,
+                                    first ? NULL : missing) != 0)
               {
                 break;
               }
-            for (i = 0; i < VELAOPS_TUNNEL_WAIT_SECONDS; i++)
-              {
-                struct stat st;
 
-                if (stat(VELAOPS_TUNNEL_IN_READY, &st) == 0)
+            for (ms = 0; ms < VELAOPS_TUNNEL_ROUND_WAIT_MS; ms += 200)
+              {
+                if (access(VELAOPS_TUNNEL_ACK, F_OK) == 0)
                   {
-                    waited = 1;
+                    acked = 1;
                     break;
                   }
-                sleep(1);
+                if (access(VELAOPS_TUNNEL_NACK, F_OK) == 0)
+                  {
+                    break;
+                  }
+                usleep(200000);
               }
+            if (acked)
+              {
+                break;
+              }
+            if (access(VELAOPS_TUNNEL_NACK, F_OK) == 0 &&
+                velaops_tunnel_read_nack(missing, nchunks) > 0)
+              {
+                continue;
+              }
+            /* 连 NACK 都没收到，视为整体丢失，重发全部。 */
+            memset(missing, 1, (size_t)nchunks);
           }
-        free(request);
+        free(b64);
+        free(missing);
+
+        if (!acked)
+          {
+            syslog(LOG_ERR, "velaops tunnel: no ack from relay\n");
+            velaops_tunnel_send_error(client);
+            close(client);
+            continue;
+          }
+
+        /* 已收妥，等 relay 注入响应（LLM 可能较慢）。 */
+        {
+          int limit = is_llm ? VELAOPS_TUNNEL_LLM_READY_MS
+                             : VELAOPS_TUNNEL_FAST_READY_MS;
+          int ms;
+
+          for (ms = 0; ms < limit; ms += 200)
+            {
+              struct stat st;
+
+              if (stat(VELAOPS_TUNNEL_IN_READY, &st) == 0)
+                {
+                  waited = 1;
+                  break;
+                }
+              usleep(200000);
+            }
+        }
       }
       if (!waited)
         {
