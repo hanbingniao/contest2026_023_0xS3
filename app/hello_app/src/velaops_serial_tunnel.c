@@ -583,6 +583,7 @@ int velaops_serial_tunnel_run(void)
             }
           syslog(LOG_ERR, "velaops tunnel: wrote LLM response %ld bytes\n",
                  (long)response_len);
+          syslog(LOG_ERR, "velaops tunnel: resp head=[%.40s]\n", response);
         }
       else
         {
