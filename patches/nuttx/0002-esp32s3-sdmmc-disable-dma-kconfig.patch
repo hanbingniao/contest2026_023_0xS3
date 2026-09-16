@@ -1,0 +1,14 @@
+diff --git a/arch/xtensa/src/esp32s3/Kconfig b/arch/xtensa/src/esp32s3/Kconfig
+index 6ce5f143aa8..60e822d4e2e 100644
+--- a/arch/xtensa/src/esp32s3/Kconfig
++++ b/arch/xtensa/src/esp32s3/Kconfig
+@@ -2687,7 +2687,8 @@ config ESP32S3_SDMMC
+ 	select SDIO_BLOCKSETUP
+ 	select SCHED_WORKQUEUE
+ 	select SCHED_HPWORK
+-	select ESP32S3_SDMMC_DMA
++	# DMA is optional; the ESP32-S3-EYE PIO path is required for reliable
++	# transfers with this board's card wiring.
+ 	default n
+ 
+ config ESP32S3_SDMMC_DMA

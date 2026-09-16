@@ -16,6 +16,8 @@ AI 硬件产品创新。
 - 后台巡检对异常进行连续采样、去抖和去重，主动注入 `opened`/`recovered` 事件。
 - `velaops_restart_service` 只允许修复固定白名单服务，并要求 BOOT 长按实体批准。
 - 修复后使用新的 request ID 再次取证，不把 Action 返回值直接当作恢复结论。
+- 看板巡检延迟到 Agent 网络建链稳定后再开始；掉线时只诊断不改接口，避免打断
+  正常链路，`velaops net-check` 可现场复核。
 - ST7789 LCD 显示资源看板、故障状态和 Agent 弹窗；`velaops_show_message` 已真机验证显示 `TEST-OK`。
 - MiMo 不可用时可使用本地规则降级，安全输出结构化诊断且不执行变更。
 

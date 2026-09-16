@@ -19,7 +19,8 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_023_VELAOPS)
     src/velaops_proxy_client.c
     src/velaops_proxy_http_transport.c
     src/velaops_dashboard.c
-    src/velaops_display.c)
+    src/velaops_display.c
+    src/velaops_serial_tunnel.c)
   set(VELAOPS_INCDIRS
     ${CMAKE_CURRENT_LIST_DIR}/include
     ${CMAKE_CURRENT_LIST_DIR}/src

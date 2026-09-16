@@ -1,5 +1,5 @@
 # server-incident-response
-MANDATORY for every VelaOps health, incident, or repair request: use `read_file` to read this complete skill, then return only its minified JSON.
+MANDATORY for every VelaOps health, incident, or repair request: use `read_file` to read this complete skill, then return only its minified JSON; if the skill text and the evidence are already provided, call no tool and output the JSON directly.
 
 ## When to use
 Use for server health, resource, outage, incident, repair, or proactive VelaOps events. Reject arbitrary hosts and commands.
