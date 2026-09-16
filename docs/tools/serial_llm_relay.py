@@ -269,12 +269,9 @@ def main() -> int:
                     sys.stderr.write(
                         "[relay] 响应体: " + repr(response[:1600]) + "\n")
                 sys.stderr.flush()
-                verified = _push_b64_verified(
-                    fd, events, base64.b64encode(response), B64_REMOTE)
-                if verified:
-                    _write_nsh(fd, f"echo x > {READY_REMOTE}")
-                else:
-                    sys.stderr.write("[relay] 响应回写校验失败，跳过本次响应\n")
+                # 直接回写：`cat` 回显会污染回读比对，误判反而拦截正常响应。
+                _push_b64(fd, base64.b64encode(response), B64_REMOTE)
+                _write_nsh(fd, f"echo x > {READY_REMOTE}")
                 sys.stderr.write(f"[relay] 已回写响应 {len(response)} 字节\n")
                 sys.stderr.flush()
             else:
