@@ -43,6 +43,14 @@ NACK_REMOTE = "/tmp/vop-nack"
 MAX_ROUNDS = int(os.environ.get("RELAY_MAX_ROUNDS", "6"))
 ROUND_SECONDS = float(os.environ.get("RELAY_ROUND_SECONDS", "3"))
 _ECHO = os.environ.get("RELAY_ECHO", "0") == "1"
+_WRITE_LOCK = threading.Lock()
+
+# 板端是半双工控制台：relay 不等回显就连发命令会打断板端输入行
+# （实测丢换行 → 相邻命令粘连 → "no matching '"）。这里以"回显到达"
+# 作为流控信号，保证一条命令被板端完整消费后再发下一条。
+_ECHO_EVENT = threading.Event()
+_echo_needle = ""
+_ECHO_WAIT = float(os.environ.get("RELAY_ECHO_WAIT", "3.0"))
 
 
 def crc16(data: bytes) -> int:
@@ -142,28 +150,55 @@ def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
                 if crc16(payload) != crc:
                     continue
                 events.put(("C", xid, seq, payload))
-            elif _ECHO and line:
-                sys.stdout.write(raw.decode(errors="replace") + "\n")
-                sys.stdout.flush()
+            else:
+                if _echo_needle and _echo_needle in line.decode(
+                        errors="replace"):
+                    _ECHO_EVENT.set()
+                if _ECHO and line:
+                    sys.stdout.write(raw.decode(errors="replace") + "\n")
+                    sys.stdout.flush()
         if len(buffer) > 8 * 1024 * 1024:
             buffer.clear()
 
 
-def _write_nsh(fd: int, command: str) -> None:
-    for ch in command:
+def _send_line(fd: int, text: str, char_delay: float,
+               expect: str | None = None) -> None:
+    """写一行并等板端回显出该行（流控），避免连发时丢字符/粘连。"""
+    global _echo_needle
+    _echo_needle = expect if expect is not None else text[:24]
+    _ECHO_EVENT.clear()
+    for ch in text:
         os.write(fd, ch.encode("ascii"))
-        time.sleep(0.001)
+        if char_delay:
+            time.sleep(char_delay)
     os.write(fd, b"\n")
-    time.sleep(0.05)
+    _ECHO_EVENT.wait(_ECHO_WAIT)
+    _echo_needle = ""
+
+
+def _write_nsh(fd: int, command: str) -> None:
+    # 串口写需串行化：主循环（响应回写）与 set-time 后台线程都会下发命令。
+    with _WRITE_LOCK:
+        _send_line(fd, command, 0.001)
+        time.sleep(0.05)
 
 
 def _push_b64(fd: int, b64: bytes, remote: str) -> None:
-    """以 '@'+base64 字面量 echo 追加写入；'@' 非 base64 字符，板端解码会忽略，
-    但能让回读校验区分文件行与 cat 回显行。"""
+    """以 base64 字面量 echo 追加写入。
+
+    快发会丢字符导致文件被截断（实测只写进 2 行），这里逐字符放慢并给每条命令
+    留出处理时间；板端解码器只认 base64 字符，不能加任何前缀。"""
     _write_nsh(fd, f"rm -f {remote}")
     text = b64.decode("ascii")
-    for i in range(0, len(text), 50):
-        _write_nsh(fd, f"echo '@{text[i:i + 50]}' >> {remote}")
+    char_delay = float(os.environ.get("PUSH_CHAR_DELAY", "0.003"))
+    line_delay = float(os.environ.get("PUSH_LINE_DELAY", "0.15"))
+    with _WRITE_LOCK:
+        for i in range(0, len(text), 48):
+            chunk = text[i:i + 48]
+            command = f"echo '{chunk}' >> {remote}"
+            # 用 base64 片段本身作为回显判据（各段唯一）；等板端回显再发下一段。
+            _send_line(fd, command, char_delay, expect=chunk)
+            time.sleep(line_delay)
 
 
 def _read_remote(fd: int, events: "queue.Queue[tuple]", remote: str,
@@ -208,17 +243,23 @@ def main() -> int:
     sys.stderr.flush()
 
     # HMAC 需要时间；隧道不搬 NTP，直接注入开发机时间。板端 autoconfig 会同时
-    # 打印 NTP 日志，单次注入可能被撞坏，故多轮重试以确保有一次干净落地。
-    if os.environ.get("SET_TIME", "1") == "1":
-        rounds = int(os.environ.get("SET_TIME_ROUNDS", "8"))
-        for round_index in range(rounds):
-            time.sleep(float(os.environ.get("SET_TIME_DELAY", "6")) if round_index == 0 else 7.0)
-            _write_nsh(fd, f"velaops set-time {int(time.time())}")
+    # 打印 NTP 日志，单次注入可能被撞坏，故多轮重试。**必须在后台线程执行**：
+    # 若占用主循环，会把板端认证帧的 ACK 拖到超时，导致 504/重放。
+    def _bootstrap() -> None:
+        if os.environ.get("SET_TIME", "1") == "1":
+            rounds = int(os.environ.get("SET_TIME_ROUNDS", "8"))
+            for round_index in range(rounds):
+                delay = (float(os.environ.get("SET_TIME_DELAY", "6"))
+                         if round_index == 0 else 7.0)
+                time.sleep(delay)
+                _write_nsh(fd, f"velaops set-time {int(time.time())}")
+        if os.environ.get("AUTO_DIAG", "0") == "1":
+            time.sleep(float(os.environ.get("AUTO_DIAG_DELAY", "80")))
+            _write_nsh(fd, "echo x > /tmp/velaops-diagnose")
+            sys.stderr.write("[relay] 已触发板端单轮 LLM 诊断\n")
+            sys.stderr.flush()
 
-    if os.environ.get("AUTO_DIAG", "0") == "1":
-        time.sleep(float(os.environ.get("AUTO_DIAG_DELAY", "80")))
-        _write_nsh(fd, "echo x > /tmp/velaops-diagnose")
-        sys.stderr.write("[relay] 已触发板端单轮 LLM 诊断\n")
+    threading.Thread(target=_bootstrap, daemon=True).start()
 
     pending: dict[int, dict] = {}
     while True:
@@ -244,13 +285,19 @@ def main() -> int:
         for xid, entry in list(pending.items()):
             total = entry["n"] if entry["n"] is not None else (
                 max(entry["chunks"]) + 1 if entry["chunks"] else 0)
-            if total <= 0 or now < entry["deadline"]:
+            if total <= 0:
                 continue
             missing = [seq for seq in range(total) if seq not in entry["chunks"]]
+            # 块收齐就立即 ACK；只有缺块且超时才回 NACK。
+            if missing and now < entry["deadline"]:
+                continue
             if not missing:
                 data = b"".join(entry["chunks"][seq] for seq in range(total))
                 del pending[xid]
                 _write_nsh(fd, f"echo x > {ACK_REMOTE}")
+                sys.stderr.write(
+                    f"[relay] {time.strftime('%H:%M:%S')} 已写 ACK {ACK_REMOTE}\n")
+                sys.stderr.flush()
                 try:
                     request = base64.b64decode(data)
                 except Exception as exc:  # noqa: BLE001
@@ -287,11 +334,9 @@ def main() -> int:
                     sys.stderr.write(
                         "[relay] 响应体: " + repr(response[:1600]) + "\n")
                 sys.stderr.flush()
-                if _push_b64_verified(fd, events,
-                                      base64.b64encode(response), B64_REMOTE):
-                    _write_nsh(fd, f"echo x > {READY_REMOTE}")
-                else:
-                    sys.stderr.write("[relay] 响应回写校验失败，跳过本次响应\n")
+                # 直接回写并置 READY：回读校验会让 relay 变忙、加剧 ACK/READY 竞态。
+                _push_b64(fd, base64.b64encode(response), B64_REMOTE)
+                _write_nsh(fd, f"echo x > {READY_REMOTE}")
                 sys.stderr.write(f"[relay] {time.strftime('%H:%M:%S')} 已回写响应 {len(response)} 字节\n")
                 sys.stderr.flush()
             else:

@@ -31,6 +31,20 @@ static void test_valid_result(void)
   EXPECTED(observation.used_percent == 31.97);
 }
 
+static void test_accepts_check_resources_container(void)
+{
+  const char json[] =
+      "{\"memory\":{\"total_bytes\":16478060544,"
+      "\"available_bytes\":11209646080,\"used_bytes\":5268414464,"
+      "\"used_percent\":31.97},\"disk\":{\"alias\":\"root\"}}";
+  velaops_memory_observation_t observation;
+
+  EXPECTED(velaops_memory_result_parse(json, &observation) ==
+           VELAOPS_MEMORY_RESULT_OK);
+  EXPECTED(observation.total_bytes == UINT64_C(16478060544));
+  EXPECTED(observation.used_percent == 31.97);
+}
+
 static void test_rejects_schema_drift(void)
 {
   velaops_memory_observation_t observation;
@@ -74,6 +88,7 @@ static void test_invalid_input_does_not_write_output(void)
 int main(void)
 {
   test_valid_result();
+  test_accepts_check_resources_container();
   test_rejects_schema_drift();
   test_invalid_input_does_not_write_output();
   puts("PASS: VelaOps memory result adapter tests");

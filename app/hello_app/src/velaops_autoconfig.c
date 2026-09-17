@@ -543,13 +543,19 @@ static int velaops_autoconfig_write_agent_router(
 
   if (velaops_credentials_use_serial(cred))
     {
+      /* 除 llm_backend_0 外，还要写 ai_agent 实际读取的扁平键
+       * （api_key/model/llm_host/llm_path/llm_port），否则运行时报 No API key。 */
       fprintf(file,
               "{\"llm_backend_0\":\"{\\\"host\\\":\\\"" VELAOPS_TUNNEL_HOST
               "\\\",\\\"path\\\":\\\"/v1/chat/completions\\\",\\\"port\\\":"
               "\\\"" VELAOPS_TUNNEL_PORT_STR "\\\",\\\"api_key\\\":\\\"%s\\\","
               "\\\"model\\\":\\\"mimo-v2.5\\\",\\\"priority\\\":0,"
-              "\\\"cost_tier\\\":1}\"}",
-              cred->api_key);
+              "\\\"cost_tier\\\":1}\","
+              "\"api_key\":\"%s\",\"model\":\"mimo-v2.5\","
+              "\"llm_host\":\"" VELAOPS_TUNNEL_HOST "\","
+              "\"llm_path\":\"/v1/chat/completions\","
+              "\"llm_port\":\"" VELAOPS_TUNNEL_PORT_STR "\"}",
+              cred->api_key, cred->api_key);
       printf("velaops autoconfig: Agent 路由已预写串口隧道 %s:%s\n",
              VELAOPS_TUNNEL_HOST, VELAOPS_TUNNEL_PORT_STR);
     }
@@ -559,13 +565,22 @@ static int velaops_autoconfig_write_agent_router(
               "{\"llm_backend_0\":\"{\\\"host\\\":\\\"%s\\\","
               "\\\"path\\\":\\\"/v1/chat/completions\\\",\\\"port\\\":"
               "\\\"%s\\\",\\\"api_key\\\":\\\"%s\\\",\\\"model\\\":"
-              "\\\"mimo-v2.5\\\",\\\"priority\\\":0,\\\"cost_tier\\\":1}\"}",
+              "\\\"mimo-v2.5\\\",\\\"priority\\\":0,\\\"cost_tier\\\":1}\","
+              "\"api_key\":\"%s\",\"model\":\"mimo-v2.5\","
+              "\"llm_host\":\"%s\",\"llm_path\":\"/v1/chat/completions\","
+              "\"llm_port\":\"%s\"}",
               cred->has_demo_host && cred->demo_host[0] != '\0'
                   ? cred->demo_host
                   : "api.xiaomimimo.com",
               cred->has_demo_host && cred->demo_host[0] != '\0' ? "28792"
                                                                  : "443",
-              cred->api_key);
+              cred->api_key,
+              cred->api_key,
+              cred->has_demo_host && cred->demo_host[0] != '\0'
+                  ? cred->demo_host
+                  : "api.xiaomimimo.com",
+              cred->has_demo_host && cred->demo_host[0] != '\0' ? "28792"
+                                                                 : "443");
       printf("velaops autoconfig: Agent 路由已预写 WiFi 直连\n");
     }
   fclose(file);
