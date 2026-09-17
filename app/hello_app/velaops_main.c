@@ -69,6 +69,29 @@
 #define VELAOPS_SKILL_PATH "/data/ai_agent/skills/server-incident-response.md"
 #define VELAOPS_LLM_PROMPT_CAPACITY 6144
 #define VELAOPS_LLM_SKILL_CAPACITY 4096
+/* 串口隧道是单连接半双工：Agent 的 LLM 诊断请求与看板巡检并发会让隧道卡死。
+ * 入队 LLM 诊断后暂停巡检该窗口，等诊断完成再恢复；可用环境变量覆盖以便联调。 */
+#define VELAOPS_LLM_PAUSE_DEFAULT_SECONDS 90
+
+static volatile time_t g_llm_pause_until;
+
+static time_t velaops_llm_pause_seconds(void)
+{
+  const char *value = getenv("VELAOPS_LLM_PAUSE");
+  long seconds;
+
+  if (value != NULL && value[0] != '\0')
+    {
+      char *end;
+      errno = 0;
+      seconds = strtol(value, &end, 10);
+      if (errno == 0 && end != value && *end == '\0' && seconds >= 0)
+        {
+          return (time_t)seconds;
+        }
+    }
+  return VELAOPS_LLM_PAUSE_DEFAULT_SECONDS;
+}
 
 static int velaops_set_demo_time(const char *value)
 {
@@ -560,6 +583,9 @@ static int velaops_queue_llm_diagnosis(const char *resources)
     }
   fwrite(prompt, 1, strlen(prompt), file);
   fclose(file);
+
+  /* 让看板巡检在 LLM 诊断窗口内退避，避免与 Agent 抢单条隧道。 */
+  g_llm_pause_until = time(NULL) + velaops_llm_pause_seconds();
   return 0;
 }
 
@@ -1008,6 +1034,16 @@ int main(int argc, char *argv[])
               velaops_incident_event_t incident_event;
               velaops_resource_incident_status_t incident_status;
               int request_status;
+
+              /* LLM 诊断窗口内让路：隧道同一时刻只能服务一个请求，
+               * 若与看板巡检并发会导致隧道卡死。 */
+              if (g_llm_pause_until > 0 &&
+                  time(NULL) < g_llm_pause_until)
+                {
+                  next_refresh = g_llm_pause_until;
+                  sleep(1);
+                  continue;
+                }
 
               /* 网络请求可能阻塞数秒。只在线程私有副本上更新，完成后再
                * 一次性交给显示线程，避免 BOOT 翻页读到半更新状态。
