@@ -77,6 +77,7 @@ velaops_memory_result_status_t velaops_memory_result_parse(
   velaops_memory_observation_t parsed;
   const cJSON *used_percent;
   cJSON *root;
+  cJSON *node;
 
   if (result_json == NULL || observation == NULL)
     {
@@ -88,11 +89,24 @@ velaops_memory_result_status_t velaops_memory_result_parse(
       cJSON_Delete(root);
       return VELAOPS_MEMORY_RESULT_INVALID_JSON;
     }
-  used_percent = cJSON_GetObjectItemCaseSensitive(root, "used_percent");
-  if (!velaops_has_exact_fields(root) ||
-      !velaops_json_uint64(root, "total_bytes", &parsed.total_bytes) ||
-      !velaops_json_uint64(root, "available_bytes", &parsed.available_bytes) ||
-      !velaops_json_uint64(root, "used_bytes", &parsed.used_bytes) ||
+
+  /* 兼容两种 result 形态：check_memory 的扁平四字段，以及
+   * check_resources 把内存包在 "memory" 子对象里。 */
+  node = root;
+  if (cJSON_GetObjectItemCaseSensitive(root, "total_bytes") == NULL)
+    {
+      cJSON *memory = cJSON_GetObjectItemCaseSensitive(root, "memory");
+      if (cJSON_IsObject(memory))
+        {
+          node = memory;
+        }
+    }
+
+  used_percent = cJSON_GetObjectItemCaseSensitive(node, "used_percent");
+  if (!velaops_has_exact_fields(node) ||
+      !velaops_json_uint64(node, "total_bytes", &parsed.total_bytes) ||
+      !velaops_json_uint64(node, "available_bytes", &parsed.available_bytes) ||
+      !velaops_json_uint64(node, "used_bytes", &parsed.used_bytes) ||
       !cJSON_IsNumber(used_percent) || !isfinite(used_percent->valuedouble))
     {
       cJSON_Delete(root);
