@@ -1,5 +1,12 @@
 /****************************************************************************
- * VelaOps 240x240 资源看板渲染器。
+ * VelaOps 240x240 运维看板渲染器。
+ *
+ * 参考成熟运维工具（top/htop/glances）的信息层级：顶部状态条给出总体健康
+ * 与数据新鲜度，正文用大号数值 + 条形/柱形仪表突出关键指标，页脚给出操作
+ * 提示。三页分别为：
+ *   0) 概览：总体状态 + CPU/内存/磁盘三柱仪表 + 服务/端口速览
+ *   1) 性能：CPU 使用率 + 负载 + 历史曲线，内存用量与明细
+ *   2) 运维：服务状态、端口连通性、磁盘占用与数据更新时间
  ****************************************************************************/
 
 #include "velaops_dashboard.h"
@@ -10,11 +17,22 @@
 
 #define FONT_WIDTH 5
 #define FONT_HEIGHT 7
+#define ADVANCE (FONT_WIDTH + 1)
+#define HEADER_SEP_Y 36
+#define CONTENT_TOP 44
 
 typedef struct
 {
   uint16_t *pixels;
 } dashboard_canvas_t;
+
+typedef enum
+{
+  DASH_OFFLINE = 0,
+  DASH_CRITICAL,
+  DASH_WARNING,
+  DASH_HEALTHY
+} dash_status_t;
 
 static uint16_t rgb565(unsigned int red, unsigned int green,
                        unsigned int blue)
@@ -28,10 +46,9 @@ static uint16_t rgb565(unsigned int red, unsigned int green,
  */
 
 static uint16_t color_background(void) { return rgb565(0, 0, 0); }
-static uint16_t color_card(void) { return rgb565(0, 0, 0); }
-static uint16_t color_highlight(void) { return rgb565(28, 28, 28); }
+static uint16_t color_highlight(void) { return rgb565(36, 36, 40); }
 static uint16_t color_text(void) { return rgb565(255, 255, 255); }
-static uint16_t color_muted(void) { return rgb565(160, 160, 160); }
+static uint16_t color_muted(void) { return rgb565(150, 150, 150); }
 static uint16_t color_cyan(void) { return rgb565(0, 190, 255); }
 static uint16_t color_green(void) { return rgb565(0, 220, 96); }
 static uint16_t color_amber(void) { return rgb565(255, 174, 48); }
@@ -106,6 +123,10 @@ static void glyph_for(char character, uint8_t glyph[FONT_WIDTH])
   };
 
   memset(glyph, 0, FONT_WIDTH);
+  if (character >= 'a' && character <= 'z')
+    {
+      character = (char)(character - 'a' + 'A');
+    }
   if (character >= 'A' && character <= 'Z')
     {
       memcpy(glyph, letters[character - 'A'], FONT_WIDTH);
@@ -116,7 +137,7 @@ static void glyph_for(char character, uint8_t glyph[FONT_WIDTH])
     }
   else if (character == '%')
     {
-      const uint8_t value[] = {0x19, 0x04, 0x02, 0x13, 0};
+      const uint8_t value[] = {0x23, 0x13, 0x08, 0x64, 0x62};
       memcpy(glyph, value, sizeof(value));
     }
   else if (character == ':')
@@ -141,6 +162,16 @@ static void glyph_for(char character, uint8_t glyph[FONT_WIDTH])
       glyph[3] = 0x02;
       glyph[4] = 0x01;
     }
+  else if (character == '=')
+    {
+      glyph[1] = 0x0a;
+      glyph[3] = 0x0a;
+    }
+  else if (character == '!')
+    {
+      glyph[1] = 0x17;
+      glyph[3] = 0x11;
+    }
 }
 
 static void draw_text(dashboard_canvas_t *canvas, int x, int y,
@@ -160,7 +191,7 @@ static void draw_text(dashboard_canvas_t *canvas, int x, int y,
             {
               if ((glyph[gx] & (1U << gy)) != 0)
                 {
-                  fill_rect(canvas, x + (int)index * (FONT_WIDTH + 1) * scale +
+                  fill_rect(canvas, x + (int)index * ADVANCE * scale +
                             gx * scale, y + gy * scale, scale, scale, color);
                 }
             }
@@ -168,184 +199,441 @@ static void draw_text(dashboard_canvas_t *canvas, int x, int y,
     }
 }
 
-static uint16_t status_color(const velaops_display_state_t *state)
+static int text_width(const char *text, int scale)
 {
-  if (!state->online || state->health == VELAOPS_HEALTH_UNHEALTHY)
+  return (int)strlen(text) * ADVANCE * scale;
+}
+
+static void draw_text_right(dashboard_canvas_t *canvas, int right, int y,
+                            const char *text, int scale, uint16_t color)
+{
+  draw_text(canvas, right - text_width(text, scale), y, text, scale, color);
+}
+
+static void draw_text_center(dashboard_canvas_t *canvas, int x, int width,
+                             int y, const char *text, int scale,
+                             uint16_t color)
+{
+  int offset = (width - text_width(text, scale)) / 2;
+
+  draw_text(canvas, x + (offset > 0 ? offset : 0), y, text, scale, color);
+}
+
+/* ── 状态与配色 ─────────────────────────────────────────────── */
+
+static dash_status_t dash_overall(const velaops_display_state_t *state)
+{
+  double memory = 0.0;
+  double cpu = 0.0;
+  double disk = 0.0;
+  int critical = 0;
+
+  if (!state->online)
+    {
+      return DASH_OFFLINE;
+    }
+  if (!state->has_resources)
+    {
+      return DASH_WARNING;
+    }
+
+  memory = state->memory.used_percent;
+  disk = state->resources.disk_percent;
+  cpu = state->resources.cpu.valid ? state->resources.cpu.used_percent : 0.0;
+
+  critical = !state->resources.service_active ||
+             !state->resources.port_reachable ||
+             memory >= 90.0 || disk >= 92.0 || cpu >= 90.0 ||
+             state->health == VELAOPS_HEALTH_UNHEALTHY;
+  if (critical)
+    {
+      return DASH_CRITICAL;
+    }
+  if (memory >= 75.0 || disk >= 80.0 || cpu >= 75.0)
+    {
+      return DASH_WARNING;
+    }
+  return DASH_HEALTHY;
+}
+
+static const char *dash_status_word(dash_status_t status)
+{
+  switch (status)
+    {
+      case DASH_OFFLINE:
+        return "OFFLINE";
+      case DASH_CRITICAL:
+        return "CRITICAL";
+      case DASH_WARNING:
+        return "WARNING";
+      default:
+        return "HEALTHY";
+    }
+}
+
+static uint16_t dash_status_color(dash_status_t status)
+{
+  switch (status)
+    {
+      case DASH_OFFLINE:
+      case DASH_CRITICAL:
+        return color_red();
+      case DASH_WARNING:
+        return color_amber();
+      default:
+        return color_green();
+    }
+}
+
+static double clamp_percent(double value)
+{
+  if (value < 0.0)
+    {
+      return 0.0;
+    }
+  if (value > 100.0)
+    {
+      return 100.0;
+    }
+  return value;
+}
+
+static uint16_t level_color(double percent, double warning, double critical)
+{
+  if (percent >= critical)
     {
       return color_red();
     }
-
-  return color_green();
+  if (percent >= warning)
+    {
+      return color_amber();
+    }
+  return color_cyan();
 }
+
+/* ── 图元 ───────────────────────────────────────────────────── */
+
+static void draw_bar(dashboard_canvas_t *canvas, int x, int y, int width,
+                     int height, double percent, uint16_t color)
+{
+  int filled = (int)((double)(width - 2) * clamp_percent(percent) / 100.0 +
+                     0.5);
+
+  fill_rect(canvas, x, y, width, height, color_highlight());
+  if (filled > 0)
+    {
+      fill_rect(canvas, x + 1, y + 1, filled, height - 2, color);
+    }
+}
+
+static void draw_gauge(dashboard_canvas_t *canvas, int x, int y, int width,
+                       int height, double percent, uint16_t color)
+{
+  int filled = (int)((double)(height - 2) * clamp_percent(percent) / 100.0 +
+                     0.5);
+
+  fill_rect(canvas, x, y, width, height, color_highlight());
+  if (filled > 0)
+    {
+      fill_rect(canvas, x + 1, y + height - 1 - filled, width - 2, filled,
+                color);
+    }
+}
+
+/* 屏显数值统一用整数拼接，不依赖 libc 的浮点/长整型 printf。NuttX 上
+ * 带长度修饰的 printf 与浮点格式化在该屏显路径下曾触发难以定位的崩溃，
+ * 整数格式化既稳定又省栈。 */
+
+static char *format_percent1(char *buffer, size_t capacity, double percent)
+{
+  int scaled = (int)(clamp_percent(percent) * 10.0 + 0.5);
+
+  snprintf(buffer, capacity, "%d.%d%%", scaled / 10, scaled % 10);
+  return buffer;
+}
+
+static char *format_load(char *buffer, size_t capacity, double load)
+{
+  int scaled = (int)(load * 100.0 + 0.5);
+
+  if (scaled < 0)
+    {
+      scaled = 0;
+    }
+  snprintf(buffer, capacity, "%d.%02d", scaled / 100, scaled % 100);
+  return buffer;
+}
+
+static char *format_gb(char *buffer, size_t capacity, uint64_t bytes)
+{
+  if (bytes >= UINT64_C(1024) * 1024 * 1024)
+    {
+      unsigned long tenths =
+          (unsigned long)((bytes * 10U + (UINT64_C(1) << 29)) >> 30);
+
+      snprintf(buffer, capacity, "%lu.%luG", tenths / 10, tenths % 10);
+    }
+  else
+    {
+      snprintf(buffer, capacity, "%luM",
+               (unsigned long)(bytes >> 20));
+    }
+  return buffer;
+}
+
+/* ── 顶部状态条 ─────────────────────────────────────────────── */
 
 static void draw_header(dashboard_canvas_t *canvas,
                         const velaops_display_state_t *state,
                         unsigned int page)
 {
+  dash_status_t status = dash_overall(state);
+  uint16_t accent = dash_status_color(status);
   unsigned int index;
 
-  dot(canvas, 14, 17, 4, status_color(state));
-  draw_text(canvas, 25, 10, "VELAOPS", 2, color_text());
+  dot(canvas, 15, 15, 5, accent);
+  draw_text(canvas, 27, 8, "VELAOPS", 2, color_text());
+  draw_text_right(canvas, 228, 11, dash_status_word(status), 1, accent);
+  draw_text(canvas, 12, 26,
+            state->online && state->has_resources ? "REALTIME MONITOR" :
+                                                    "WAITING FOR DATA",
+            1, color_muted());
+
   for (index = 0; index < VELAOPS_DISPLAY_PAGE_COUNT; index++)
     {
-      dot(canvas, 196 + (int)index * 15, 17, index == page ? 4 : 2,
-          index == page ? color_cyan() : color_muted());
+      dot(canvas, 208 + (int)index * 12, 29, index == page ? 3 : 2,
+          index == page ? color_cyan() : color_highlight());
     }
 
-  fill_rect(canvas, 10, 34, 220, 1, color_highlight());
+  fill_rect(canvas, 10, HEADER_SEP_Y, 220, 1, color_highlight());
 }
 
-static void draw_progress(dashboard_canvas_t *canvas, int x, int y, int width,
-                          double percent, uint16_t color)
+/* ── 第 0 页：概览 ──────────────────────────────────────────── */
+
+static void draw_metric_card(dashboard_canvas_t *canvas, int x, int y,
+                             int width, const char *label, double percent,
+                             uint16_t color, int valid)
 {
-  int filled;
+  char value[12];
 
-  if (percent < 0.0)
+  draw_text_center(canvas, x, width, y, label, 1, color_muted());
+  draw_gauge(canvas, x + width / 2 - 8, y + 16, 16, 46, valid ? percent : 0.0,
+             valid ? color : color_highlight());
+  if (valid)
     {
-      percent = 0.0;
+      snprintf(value, sizeof(value), "%d%%",
+               (int)(clamp_percent(percent) + 0.5));
     }
-  else if (percent > 100.0)
+  else
     {
-      percent = 100.0;
+      snprintf(value, sizeof(value), "--");
     }
-
-  fill_rect(canvas, x, y, width, 8, color_highlight());
-  filled = (int)((double)(width - 4) * percent / 100.0);
-  fill_rect(canvas, x + 2, y + 2, filled, 4, color);
-}
-
-static void format_megabytes(char *buffer, size_t capacity, uint64_t bytes)
-{
-  snprintf(buffer, capacity, "%llu MB",
-           (unsigned long long)(bytes / 1048576));
+  draw_text_center(canvas, x, width, y + 68, value, 2, color_text());
 }
 
 static void draw_overview(dashboard_canvas_t *canvas,
                           const velaops_display_state_t *state)
 {
-  char value[24];
-  uint16_t accent = status_color(state);
+  dash_status_t status = dash_overall(state);
+  uint16_t accent = dash_status_color(status);
+  double disk = state->has_resources ? state->resources.disk_percent : 0.0;
+  int cpu_valid = state->has_resources && state->resources.cpu.valid;
+  double cpu = cpu_valid ? state->resources.cpu.used_percent : 0.0;
+  double memory = state->has_resources ? state->memory.used_percent : 0.0;
+  char line[32];
 
-  draw_text(canvas, 12, 44, "SYSTEM HEALTH", 1, color_muted());
-  draw_text(canvas, 12, 57,
-            !state->online ? "OFFLINE" :
-            state->health == VELAOPS_HEALTH_HEALTHY ? "HEALTHY" : "WARNING",
-            2, accent);
+  draw_text(canvas, 12, CONTENT_TOP, "SYSTEM STATUS", 1, color_muted());
+  draw_text(canvas, 12, CONTENT_TOP + 12, dash_status_word(status), 3,
+            accent);
 
-  fill_rect(canvas, 10, 82, 220, 78, color_card());
-  draw_text(canvas, 20, 92, "MEMORY LOAD", 1, color_muted());
+  draw_metric_card(canvas, 10, 104, 68, "CPU", cpu,
+                   level_color(cpu, 75.0, 90.0), cpu_valid);
+  draw_metric_card(canvas, 86, 104, 68, "MEM", memory,
+                   level_color(memory, 75.0, 90.0), state->has_resources);
+  draw_metric_card(canvas, 162, 104, 68, "DISK", disk,
+                   level_color(disk, 80.0, 92.0), state->has_resources);
+
+  /* 页脚：服务与端口速览。 */
+  fill_rect(canvas, 10, 194, 220, 1, color_highlight());
   if (state->has_resources)
     {
-      snprintf(value, sizeof(value), "%.1f%%", state->memory.used_percent);
-    }
-  else
-    {
-      snprintf(value, sizeof(value), "--");
-    }
-  draw_text(canvas, 20, 108, value, 4, color_text());
-  draw_progress(canvas, 20, 146, 200,
-                state->has_resources ? state->memory.used_percent : 0.0,
-                state->memory.used_percent >= 85.0 ? color_red() : color_cyan());
+      int active = state->resources.service_active;
+      int reachable = state->resources.port_reachable;
 
-  fill_rect(canvas, 10, 170, 105, 47, color_card());
-  draw_text(canvas, 18, 179, "DISK", 1, color_muted());
-  if (state->has_resources)
-    {
-      snprintf(value, sizeof(value), "%.1f%%",
-               state->resources.disk_percent);
-    }
-  else
-    {
-      snprintf(value, sizeof(value), "--");
-    }
-  draw_text(canvas, 18, 194, value, 2,
-            state->resources.disk_percent >= 85.0 ? color_amber() :
-                                                    color_text());
-
-  fill_rect(canvas, 125, 170, 105, 47, color_card());
-  draw_text(canvas, 133, 179, "PROXY PORT", 1, color_muted());
-  draw_text(canvas, 133, 194,
-            state->has_resources && state->resources.port_reachable ?
-            "OPEN" : "CLOSED", 2,
-            state->has_resources && state->resources.port_reachable ?
-            color_green() : color_red());
-}
-
-static void draw_service(dashboard_canvas_t *canvas,
-                         const velaops_display_state_t *state)
-{
-  char value[24];
-  int active = state->has_resources && state->resources.service_active;
-  int reachable = state->has_resources && state->resources.port_reachable;
-
-  draw_text(canvas, 12, 44, "SERVICE STATUS", 1, color_muted());
-  fill_rect(canvas, 10, 61, 220, 55, color_card());
-  dot(canvas, 28, 88, 7, active ? color_green() : color_red());
-  draw_text(canvas, 46, 75, "PROXY SERVICE", 1, color_muted());
-  draw_text(canvas, 46, 91, active ? "ACTIVE" : "DOWN", 2,
-            active ? color_green() : color_red());
-
-  fill_rect(canvas, 10, 126, 105, 71, color_card());
-  draw_text(canvas, 18, 137, "PORT", 1, color_muted());
-  draw_text(canvas, 18, 157, reachable ? "OPEN" : "CLOSED", 2,
-            reachable ? color_green() : color_red());
-
-  fill_rect(canvas, 125, 126, 105, 71, color_card());
-  draw_text(canvas, 133, 137, "LATENCY", 1, color_muted());
-  if (state->has_resources)
-    {
-      snprintf(value, sizeof(value), "%d MS",
+      dot(canvas, 16, 208, 4, active ? color_green() : color_red());
+      draw_text(canvas, 26, 205,
+                active ? "SERVICE ACTIVE" : "SERVICE DOWN", 1,
+                active ? color_text() : color_red());
+      dot(canvas, 16, 224, 4, reachable ? color_green() : color_red());
+      snprintf(line, sizeof(line), "PORT %s %dMS",
+               reachable ? "OPEN" : "CLOSED",
                state->resources.port_latency_ms);
+      draw_text(canvas, 26, 221, line, 1,
+                reachable ? color_text() : color_red());
     }
   else
     {
-      snprintf(value, sizeof(value), "-- MS");
+      draw_text(canvas, 12, 205, "SERVICE NO DATA", 1, color_muted());
+      draw_text(canvas, 12, 221, "PORT NO DATA", 1, color_muted());
     }
-  draw_text(canvas, 133, 157, value, 2,
-            state->resources.port_latency_ms > 500 ? color_amber() :
-                                                    color_cyan());
-
-  draw_text(canvas, 12, 222, "BOOT NEXT PAGE", 1, color_muted());
 }
 
-static void draw_memory_details(dashboard_canvas_t *canvas,
-                                const velaops_display_state_t *state)
+/* ── 第 1 页：性能 ──────────────────────────────────────────── */
+
+static void draw_sparkline(dashboard_canvas_t *canvas, int x, int y,
+                           int width, int height,
+                           const velaops_display_state_t *state)
 {
-  char value[24];
+  int count = state->cpu_history_len;
+  int start;
+  int index;
+  int columns;
 
-  draw_text(canvas, 12, 44, "MEMORY DETAILS", 1, color_muted());
-  fill_rect(canvas, 10, 61, 220, 128, color_card());
-
-  draw_text(canvas, 20, 76, "TOTAL", 1, color_muted());
-  if (state->has_resources)
+  fill_rect(canvas, x, y + height - 1, width, 1, color_highlight());
+  if (count < 2)
     {
-      format_megabytes(value, sizeof(value), state->memory.total_bytes);
+      return;
+    }
+
+  columns = count < width ? count : width;
+  start = count - columns;
+  for (index = 0; index < columns; index++)
+    {
+      double value = clamp_percent(state->cpu_history[start + index]);
+      int bar = (int)((double)(height - 2) * value / 100.0 + 0.5);
+
+      if (bar > 0)
+        {
+          fill_rect(canvas, x + index, y + height - 1 - bar, 1, bar,
+                    color_cyan());
+        }
+    }
+}
+
+static void draw_performance(dashboard_canvas_t *canvas,
+                             const velaops_display_state_t *state)
+{
+  int cpu_valid = state->has_resources && state->resources.cpu.valid;
+  double cpu = cpu_valid ? state->resources.cpu.used_percent : 0.0;
+  double memory = state->has_resources ? state->memory.used_percent : 0.0;
+  char value[16];
+  char line[64];
+  char used[16];
+  char total[16];
+
+  /* CPU 区块 */
+  draw_text(canvas, 12, CONTENT_TOP, "CPU UTILIZATION", 1, color_muted());
+  if (cpu_valid)
+    {
+      format_percent1(value, sizeof(value), cpu);
     }
   else
     {
-      snprintf(value, sizeof(value), "-- MB");
+      snprintf(value, sizeof(value), "--");
     }
-  draw_text(canvas, 112, 71, value, 2, color_text());
-  fill_rect(canvas, 20, 101, 200, 1, color_highlight());
+  draw_text(canvas, 12, CONTENT_TOP + 12, value, 3,
+            level_color(cpu, 75.0, 90.0));
+  draw_bar(canvas, 12, CONTENT_TOP + 44, 216, 12, cpu,
+           level_color(cpu, 75.0, 90.0));
 
-  draw_text(canvas, 20, 116, "USED", 1, color_muted());
+  if (cpu_valid)
+    {
+      char load1[16];
+      char load5[16];
+      char load15[16];
+
+      format_load(load1, sizeof(load1), state->resources.cpu.load1);
+      format_load(load5, sizeof(load5), state->resources.cpu.load5);
+      format_load(load15, sizeof(load15), state->resources.cpu.load15);
+      snprintf(line, sizeof(line), "LOAD %s %s %s", load1, load5, load15);
+      draw_text(canvas, 12, CONTENT_TOP + 62, line, 1, color_text());
+      snprintf(line, sizeof(line), "%ld CORES",
+               (long)state->resources.cpu.cores);
+      draw_text_right(canvas, 228, CONTENT_TOP + 62, line, 1, color_muted());
+    }
+  else
+    {
+      draw_text(canvas, 12, CONTENT_TOP + 62, "NO CPU DATA", 1,
+                color_muted());
+    }
+  draw_sparkline(canvas, 12, CONTENT_TOP + 76, 216, 26, state);
+
+  /* 内存区块 */
+  fill_rect(canvas, 10, 156, 220, 1, color_highlight());
+  draw_text(canvas, 12, 164, "MEMORY", 1, color_muted());
   if (state->has_resources)
     {
-      format_megabytes(value, sizeof(value), state->memory.used_bytes);
+      format_percent1(value, sizeof(value), memory);
     }
-  draw_text(canvas, 112, 111, value, 2, color_cyan());
-  fill_rect(canvas, 20, 141, 200, 1, color_highlight());
+  else
+    {
+      snprintf(value, sizeof(value), "--");
+    }
+  draw_text(canvas, 12, 176, value, 3, level_color(memory, 75.0, 90.0));
 
-  draw_text(canvas, 20, 156, "AVAILABLE", 1, color_muted());
   if (state->has_resources)
     {
-      format_megabytes(value, sizeof(value), state->memory.available_bytes);
+      format_gb(total, sizeof(total), state->memory.total_bytes);
+      format_gb(used, sizeof(used), state->memory.used_bytes);
+      snprintf(line, sizeof(line), "USED %s / %s", used, total);
+      draw_text(canvas, 12, 208, line, 1, color_text());
     }
-  draw_text(canvas, 112, 151, value, 2, color_green());
+  else
+    {
+      draw_text(canvas, 12, 208, "USED -- / --", 1, color_muted());
+    }
+  draw_bar(canvas, 12, 222, 216, 10, memory, level_color(memory, 75.0, 90.0));
+}
 
-  fill_rect(canvas, 10, 199, 220, 20, color_highlight());
-  draw_text(canvas, 20, 205, "AUTO REFRESH 5 SEC", 1, color_cyan());
-  draw_text(canvas, 12, 225, "BOOT NEXT PAGE", 1, color_muted());
+/* ── 第 2 页：运维 ──────────────────────────────────────────── */
+
+static void draw_ops_row(dashboard_canvas_t *canvas, int y, const char *label,
+                         const char *value, uint16_t value_color)
+{
+  draw_text(canvas, 12, y, label, 1, color_muted());
+  draw_text_right(canvas, 228, y, value, 2, value_color);
+}
+
+static void draw_ops(dashboard_canvas_t *canvas,
+                     const velaops_display_state_t *state)
+{
+  char line[24];
+  double disk = state->has_resources ? state->resources.disk_percent : 0.0;
+
+  if (!state->has_resources)
+    {
+      draw_text(canvas, 12, CONTENT_TOP, "OPS MONITOR", 1, color_muted());
+      draw_text(canvas, 12, CONTENT_TOP + 16, "NO DATA", 3, color_muted());
+      draw_text(canvas, 12, 200, "WAITING FOR FIRST POLL", 1, color_muted());
+      return;
+    }
+
+  draw_text(canvas, 12, CONTENT_TOP, "SERVICE", 1, color_muted());
+  if (state->resources.service_active)
+    {
+      draw_text(canvas, 12, CONTENT_TOP + 14, "ACTIVE", 3, color_green());
+    }
+  else
+    {
+      draw_text(canvas, 12, CONTENT_TOP + 14, "DOWN", 3, color_red());
+    }
+  fill_rect(canvas, 10, 92, 220, 1, color_highlight());
+
+  draw_ops_row(canvas, 100, "PROXY PORT",
+               state->resources.port_reachable ? "OPEN" : "CLOSED",
+               state->resources.port_reachable ? color_green() : color_red());
+  snprintf(line, sizeof(line), "%d MS", state->resources.port_latency_ms);
+  draw_ops_row(canvas, 118, "LATENCY", line,
+               state->resources.port_latency_ms > 500 ? color_amber() :
+                                                        color_cyan());
+  fill_rect(canvas, 10, 138, 220, 1, color_highlight());
+
+  format_percent1(line, sizeof(line), disk);
+  draw_ops_row(canvas, 146, "DISK USED", line,
+               level_color(disk, 80.0, 92.0));
+  draw_bar(canvas, 12, 168, 216, 10, disk, level_color(disk, 80.0, 92.0));
+
+  draw_text(canvas, 12, 190, "BOOT BUTTON: NEXT PAGE", 1, color_muted());
 }
 
 int velaops_dashboard_render(uint16_t *pixels, size_t pixel_count,
@@ -372,14 +660,36 @@ int velaops_dashboard_render(uint16_t *pixels, size_t pixel_count,
     }
   else if (page == 1)
     {
-      draw_service(&canvas, state);
+      draw_performance(&canvas, state);
     }
   else
     {
-      draw_memory_details(&canvas, state);
+      draw_ops(&canvas, state);
     }
 
   return 0;
+}
+
+void velaops_dashboard_push_cpu(velaops_display_state_t *state)
+{
+  if (state == NULL || !state->resources.cpu.valid)
+    {
+      return;
+    }
+
+  if (state->cpu_history_len < VELAOPS_DISPLAY_CPU_HISTORY)
+    {
+      state->cpu_history[state->cpu_history_len++] =
+          (float)state->resources.cpu.used_percent;
+    }
+  else
+    {
+      memmove(&state->cpu_history[0], &state->cpu_history[1],
+              sizeof(state->cpu_history[0]) *
+                  (VELAOPS_DISPLAY_CPU_HISTORY - 1));
+      state->cpu_history[VELAOPS_DISPLAY_CPU_HISTORY - 1] =
+          (float)state->resources.cpu.used_percent;
+    }
 }
 
 int velaops_dashboard_render_test(uint16_t *pixels, size_t pixel_count)
@@ -432,8 +742,7 @@ int velaops_dashboard_render_test(uint16_t *pixels, size_t pixel_count)
 static void draw_text_centered(dashboard_canvas_t *canvas, int y,
                                const char *text, int scale, uint16_t color)
 {
-  int text_width = (int)strlen(text) * (FONT_WIDTH + 1) * scale;
-  int x = (VELAOPS_DISPLAY_WIDTH - text_width) / 2;
+  int x = (VELAOPS_DISPLAY_WIDTH - text_width(text, scale)) / 2;
 
   if (x < 0)
     {

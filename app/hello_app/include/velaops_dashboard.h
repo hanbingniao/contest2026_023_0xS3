@@ -18,6 +18,10 @@ int velaops_dashboard_render(uint16_t *pixels, size_t pixel_count,
                              unsigned int page);
 int velaops_dashboard_render_test(uint16_t *pixels, size_t pixel_count);
 
+/* 把本轮的 CPU 使用率追加进状态里的历史环形缓冲，供性能页曲线使用。
+ * 非有效 CPU 数据会被忽略。 */
+void velaops_dashboard_push_cpu(velaops_display_state_t *state);
+
 /* 提示框渲染：居中消息框，边框颜色随 blink_phase 交替实现闪烁提示，
  * 仅支持 ASCII 文本（屏显字库为 5x7 ASCII 点阵）。 */
 int velaops_dashboard_render_message(uint16_t *pixels, size_t pixel_count,

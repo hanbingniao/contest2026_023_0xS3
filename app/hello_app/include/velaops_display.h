@@ -11,6 +11,7 @@
 #define VELAOPS_DISPLAY_WIDTH 240
 #define VELAOPS_DISPLAY_HEIGHT 240
 #define VELAOPS_DISPLAY_PAGE_COUNT 3
+#define VELAOPS_DISPLAY_CPU_HISTORY 48
 
 typedef struct
 {
@@ -20,6 +21,8 @@ typedef struct
   int online;
   velaops_resource_observation_t resources;
   int has_resources;
+  float cpu_history[VELAOPS_DISPLAY_CPU_HISTORY];
+  int cpu_history_len;
 } velaops_display_state_t;
 
 typedef struct velaops_display_s velaops_display_t;

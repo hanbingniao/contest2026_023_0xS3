@@ -10,6 +10,8 @@
 
 #include <stddef.h>
 
+#include "velaops_resource_result.h"
+
 typedef enum
 {
   VELAOPS_DIAGNOSIS_UNKNOWN = 0,
@@ -22,5 +24,13 @@ int velaops_local_diagnosis_evaluate(
     const char *resource_json, velaops_diagnosis_status_t *status);
 int velaops_local_diagnosis_build(const char *resource_json, char *output,
                                   size_t output_capacity);
+
+/* 复用已解析资源，避免同一份 JSON 在单次巡检里被反复 cJSON 解析。 */
+int velaops_local_diagnosis_evaluate_observation(
+    const velaops_resource_observation_t *observation,
+    velaops_diagnosis_status_t *status);
+int velaops_local_diagnosis_build_observation(
+    const velaops_resource_observation_t *observation, char *output,
+    size_t output_capacity);
 
 #endif /* VELAOPS_LOCAL_DIAGNOSIS_H */

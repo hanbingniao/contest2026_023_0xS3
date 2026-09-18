@@ -49,6 +49,18 @@ int velaops_local_diagnosis_evaluate(
   return 0;
 }
 
+int velaops_local_diagnosis_evaluate_observation(
+    const velaops_resource_observation_t *observation,
+    velaops_diagnosis_status_t *status)
+{
+  if (observation == NULL || status == NULL)
+    {
+      return -1;
+    }
+  *status = velaops_evaluate_observation(observation);
+  return 0;
+}
+
 static int velaops_add_evidence(cJSON *evidence, const char *metric,
                                 const char *value, const char *reason)
 {
@@ -105,10 +117,10 @@ static int velaops_encode(cJSON *root, char *output, size_t output_capacity)
   return 0;
 }
 
-int velaops_local_diagnosis_build(const char *resource_json, char *output,
-                                  size_t output_capacity)
+static int velaops_local_diagnosis_encode(
+    const velaops_resource_observation_t *observation, int valid,
+    char *output, size_t output_capacity)
 {
-  velaops_resource_observation_t observation;
   cJSON *root;
   cJSON *evidence;
   cJSON *causes;
@@ -120,7 +132,6 @@ int velaops_local_diagnosis_build(const char *resource_json, char *output,
   char memory_value[24];
   char disk_value[24];
   velaops_diagnosis_status_t diagnosis_status = VELAOPS_DIAGNOSIS_UNKNOWN;
-  int valid;
   int result = -1;
 
   if (output == NULL || output_capacity == 0)
@@ -128,11 +139,9 @@ int velaops_local_diagnosis_build(const char *resource_json, char *output,
       return -1;
     }
   output[0] = '\0';
-  valid = resource_json != NULL &&
-          velaops_resource_result_parse(resource_json, &observation) == 0;
   if (valid)
     {
-      diagnosis_status = velaops_evaluate_observation(&observation);
+      diagnosis_status = velaops_evaluate_observation(observation);
     }
 
   root = cJSON_CreateObject();
@@ -164,10 +173,10 @@ int velaops_local_diagnosis_build(const char *resource_json, char *output,
       action = "restart_service";
       target = "proxy";
       risk = "change";
-      if ((!observation.service_active &&
+      if ((!observation->service_active &&
            velaops_add_evidence(evidence, "result.service.active_state",
                                 "not_active", "服务状态不为active") != 0) ||
-          (!observation.port_reachable &&
+          (!observation->port_reachable &&
            velaops_add_evidence(evidence, "result.port.reachable",
                                 "false", "代理端口不可达") != 0))
         {
@@ -179,14 +188,14 @@ int velaops_local_diagnosis_build(const char *resource_json, char *output,
       status = "warning";
       summary = "本地规则降级：资源达到告警阈值";
       snprintf(memory_value, sizeof(memory_value), "%.2f",
-               observation.memory.used_percent);
+               observation->memory.used_percent);
       snprintf(disk_value, sizeof(disk_value), "%.2f",
-               observation.disk_percent);
-      if ((observation.memory.used_percent >=
+               observation->disk_percent);
+      if ((observation->memory.used_percent >=
                VELAOPS_MEMORY_WARNING_PERCENT &&
            velaops_add_evidence(evidence, "result.memory.used_percent",
                                 memory_value, "达到80%告警阈值") != 0) ||
-          (observation.disk_percent >= VELAOPS_DISK_WARNING_PERCENT &&
+          (observation->disk_percent >= VELAOPS_DISK_WARNING_PERCENT &&
            velaops_add_evidence(evidence, "result.disk.used_percent",
                                 disk_value, "达到90%告警阈值") != 0))
         {
@@ -198,9 +207,9 @@ int velaops_local_diagnosis_build(const char *resource_json, char *output,
       status = "normal";
       summary = "本地规则降级：服务器资源正常";
       snprintf(memory_value, sizeof(memory_value), "%.2f",
-               observation.memory.used_percent);
+               observation->memory.used_percent);
       snprintf(disk_value, sizeof(disk_value), "%.2f",
-               observation.disk_percent);
+               observation->disk_percent);
       if (velaops_add_evidence(evidence, "result.memory.used_percent",
                                memory_value, "低于80%告警阈值") != 0 ||
           velaops_add_evidence(evidence, "result.disk.used_percent",
@@ -232,4 +241,26 @@ cleanup:
   cJSON_Delete(causes);
   cJSON_Delete(root);
   return result;
+}
+
+int velaops_local_diagnosis_build(const char *resource_json, char *output,
+                                  size_t output_capacity)
+{
+  velaops_resource_observation_t observation;
+  int valid = 0;
+
+  if (resource_json != NULL)
+    {
+      valid = velaops_resource_result_parse(resource_json, &observation) == 0;
+    }
+  return velaops_local_diagnosis_encode(&observation, valid, output,
+                                        output_capacity);
+}
+
+int velaops_local_diagnosis_build_observation(
+    const velaops_resource_observation_t *observation, char *output,
+    size_t output_capacity)
+{
+  return velaops_local_diagnosis_encode(observation, observation != NULL,
+                                        output, output_capacity);
 }
