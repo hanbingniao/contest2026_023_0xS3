@@ -296,6 +296,10 @@ def main() -> int:
         if event is not None:
             if event[0] == "H":
                 _, xid, nchunks = event
+                # 板端同一时刻只发一个请求；收到新 xid 说明旧 xid 已被放弃，
+                # 丢弃其半成品，避免对陈旧请求回 NACK/推送陈旧响应。
+                for old in [k for k in pending if k != xid]:
+                    pending.pop(old, None)
                 pending[xid] = {"n": nchunks, "chunks": {},
                                 "deadline": time.monotonic() + ROUND_SECONDS,
                                 "round": 0}

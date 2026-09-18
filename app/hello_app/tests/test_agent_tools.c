@@ -96,6 +96,18 @@ int velaops_screen_start(velaops_resource_fetcher_t fetcher)
   return OK;
 }
 
+/* 主机测试不链接 agent_main.c / velaops_agent_display.c：提供钩子桩。 */
+void agent_set_reply_hook(void (*hook)(const char *, const char *))
+{
+  (void)hook;
+}
+
+void velaops_notify_agent_reply(const char *channel, const char *content)
+{
+  (void)channel;
+  (void)content;
+}
+
 int velaops_screen_show_message(const char *text)
 {
   EXPECT(text != NULL);
