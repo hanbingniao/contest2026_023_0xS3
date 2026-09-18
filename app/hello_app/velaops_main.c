@@ -59,7 +59,7 @@
 /* LLM 诊断进行中时，Agent 的诊断工具/后台采样会与在途大请求共用隧道；此时
  * 把单次请求超时放宽为"耐心排队"，避免 15s 超时直接报 transport_error 拖垮
  * 整轮诊断。正常无诊断时仍用 15s，保证链路异常能快速失败。 */
-#define VELAOPS_HTTP_TIMEOUT_BUSY_SECONDS 120
+#define VELAOPS_HTTP_TIMEOUT_BUSY_SECONDS 240
 #define VELAOPS_RESOURCE_RESULT_CAPACITY 2048
 #define VELAOPS_LOCAL_DIAGNOSIS_CAPACITY 1024
 #define VELAOPS_INCIDENT_FAILURE_THRESHOLD 2
