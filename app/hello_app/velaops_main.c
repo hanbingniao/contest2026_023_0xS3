@@ -1130,7 +1130,9 @@ int main(int argc, char *argv[])
                     }
                   else
                     {
-                      next_refresh = g_llm_pause_until;
+                      /* 1s 粒度复查完成信号；若设成兜底截止时间，循环在到期前
+                       * 不会再进这里，等于只能等满上限。 */
+                      next_refresh = time(NULL) + 1;
                     }
                 }
               else
