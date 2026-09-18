@@ -1,0 +1,78 @@
+diff --git a/src/agent_main.c b/src/agent_main.c
+index 9d676c2..3b25251 100644
+--- a/src/agent_main.c
++++ b/src/agent_main.c
+@@ -322,6 +322,17 @@ static void quickapp_mq_dispatch(const char *chat_id, const char *content)
+ 
+ /* ── Outbound dispatch ────────────────────────────────────────── */
+ 
++/* 队伍仓钩子：设备应用通过 agent_set_reply_hook 注册回调，把 Agent 回发
++ * 内容同步到 LCD 告警框并通知看板"诊断已完成"。未注册时为空操作，上游可独立
++ * 编译；用函数指针而非弱符号，避免弱实现满足引用后强实现不被链接。 */
++typedef void (*agent_reply_hook_t)(const char* channel, const char* content);
++static agent_reply_hook_t g_agent_reply_hook;
++
++void agent_set_reply_hook(agent_reply_hook_t hook)
++{
++    g_agent_reply_hook = hook;
++}
++
+ /* ── Voice failure cooldown — prevent error-message cascade ──── */
+ 
+ static volatile bool s_voice_cooldown;
+@@ -350,6 +361,11 @@ static void* outbound_dispatch_task(void* arg)
+ 
+         syslog(LOG_INFO, "[%s] Dispatching response → %s:%s\n", TAG, msg.channel, msg.chat_id);
+ 
++        /* 设备侧钩子：诊断结论上屏 / 标记诊断完成（由设备应用注册） */
++        if (g_agent_reply_hook) {
++            g_agent_reply_hook(msg.channel, msg.content);
++        }
++
+         /* Let registered taps intercept before normal dispatch */
+         if (mbus_tap_try_deliver(&msg)) {
+             free(msg.content);
+diff --git a/src/llm/llm_proxy.c b/src/llm/llm_proxy.c
+index 9b5b132..1def273 100644
+--- a/src/llm/llm_proxy.c
++++ b/src/llm/llm_proxy.c
+@@ -53,6 +53,18 @@ static char s_vision_api_key[128] = { 0 };
+ 
+ static pthread_mutex_t s_llm_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
++/* 设备侧钩子：把 LLM 的 HTTP 请求纳入板端隧道全局串行化。未注册时空操作，
++ * 上游可独立编译；用函数指针而非弱符号，保证设备侧强实现能被链接。 */
++typedef void (*llm_io_lock_fn)(void);
++static llm_io_lock_fn s_llm_io_lock;
++static llm_io_lock_fn s_llm_io_unlock;
++
++void llm_set_io_lock_hook(llm_io_lock_fn lock_fn, llm_io_lock_fn unlock_fn)
++{
++    s_llm_io_lock = lock_fn;
++    s_llm_io_unlock = unlock_fn;
++}
++
+ /* Check if host uses OpenAI-compatible max_completion_tokens param */
+ bool is_openai_compat_host(const char* host)
+ {
+@@ -364,6 +376,10 @@ static int llm_http_direct(const char* post_data, resp_buf_t* rb,
+     int status;
+     int use_tls = (strcmp(llm_port, "443") == 0);
+ 
++    /* 与板端隧道请求互斥，避免单条半双工隧道抢道。 */
++    if (s_llm_io_lock) {
++        s_llm_io_lock();
++    }
+     if (use_tls) {
+         status = vela_https_post_json(llm_host, llm_port, llm_path, hdrs, post_data,
+             rb->data, raw_cap);
+@@ -371,6 +387,9 @@ static int llm_http_direct(const char* post_data, resp_buf_t* rb,
+         status = vela_http_post_json(llm_host, llm_port, llm_path, hdrs, post_data,
+             rb->data, raw_cap);
+     }
++    if (s_llm_io_unlock) {
++        s_llm_io_unlock();
++    }
+ 
+     if (status < 0) {
+         resp_buf_free(rb);

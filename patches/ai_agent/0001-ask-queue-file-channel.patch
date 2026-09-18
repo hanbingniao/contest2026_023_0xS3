@@ -1,0 +1,77 @@
+diff --git a/src/channels/nsh_commands.c b/src/channels/nsh_commands.c
+index 25875b5..3c8905f 100644
+--- a/src/channels/nsh_commands.c
++++ b/src/channels/nsh_commands.c
+@@ -64,6 +64,8 @@
+ #include <string.h>
+ #include <time.h>
+ #include <unistd.h>
++#include <sys/stat.h>
++#include <sys/types.h>
+ 
+ #ifdef CONFIG_BOARDCTL_RESET
+ #include <sys/boardctl.h>
+@@ -874,6 +876,49 @@ static void cmd_skill_sync(void)
+ }
+ #endif
+ 
++/* ── File queue channel ─────────────────────────────────────────
++ * 串口上 nsh 与 agent CLI 竞争读输入，外部工具注入 ask 经常被 nsh 抢走。
++ * 队列文件通道绕开串口抢占：写方（如 `velaops ask-inject`）把文本写入
++ * /tmp/vela-ask.txt，本线程读走并投递到消息总线，等价于 CLI `ask`。 */
++
++#define ASK_QUEUE_FILE "/tmp/vela-ask.txt"
++
++static void* ask_queue_watcher(void* arg)
++{
++    (void)arg;
++    char line[1024];
++
++    for (;;) {
++        FILE* fp = fopen(ASK_QUEUE_FILE, "r");
++        if (fp == NULL) {
++            usleep(300000);
++            continue;
++        }
++
++        line[0] = '\0';
++        if (fgets(line, sizeof(line), fp) == NULL) {
++            line[0] = '\0';
++        }
++        fclose(fp);
++        unlink(ASK_QUEUE_FILE);
++
++        size_t len = strlen(line);
++        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
++            line[--len] = '\0';
++        if (len == 0)
++            continue;
++
++        agent_msg_t msg = { 0 };
++        strncpy(msg.channel, "cli", sizeof(msg.channel) - 1);
++        strncpy(msg.chat_id, "queue", sizeof(msg.chat_id) - 1);
++        msg.content = strdup(line);
++        if (msg.content)
++            message_bus_push_inbound(&msg);
++        syslog(LOG_INFO, "[agent] ask(queue): %s\n", line);
++    }
++    return NULL;
++}
++
+ /* ── CLI thread ───────────────────────────────────────────────── */
+ 
+ static void* cli_thread(void* arg)
+@@ -1086,5 +1131,12 @@ int nsh_commands_init(void)
+ 
+ int nsh_commands_start(void)
+ {
+-    return agent_task_create(cli_thread, "agent_cli", AGENT_CLI_STACK, NULL, AGENT_CLI_PRIO);
++    mkdir("/tmp", 0777);
++    (void)agent_task_create(ask_queue_watcher, "ask_queue", 2048, NULL, 100);
++    (void)cli_thread; /* 保留实现，仅不再启动 */
++    /* 不再启动 cli_thread：它与 nsh 共读串口 stdin，会把外部注入的命令行
++     * （如 velaops ask-inject）按字节撕碎。串口输入全部交给 nsh，agent 改走
++     * ask-inject 文件队列通道投递消息，等价于原 `vela> ask`。 */
++    syslog(LOG_INFO, "[%s] CLI thread disabled; use ask queue file channel\n", TAG);
++    return OK;
+ }

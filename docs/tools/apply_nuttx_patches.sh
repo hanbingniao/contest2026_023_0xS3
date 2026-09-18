@@ -33,6 +33,9 @@ apply_patch_dir() {
 
 # patches/nuttx：打到 NuttX 主仓（SD 卡写路径修复、ST7789 字节序等）。
 apply_patch_dir "$team_root/patches/nuttx" "$workspace_root/nuttx"
+# patches/ai_agent：打到 ai_agent 仓（ask 文件队列通道、Agent 回发钩子、
+# LLM 请求与板端隧道共用全局锁）。上游保持 0 改动，全部在编译前打补丁。
+apply_patch_dir "$team_root/patches/ai_agent" "$workspace_root/packages/ai_agent"
 # patches/vendor：打到板级 vendor 仓（bringup 自启、defconfig）。
 # 注意：真实编译的 bringup 是 vendor 仓 esp32s3-eye/src/esp32s3_bringup.c
 # （nuttx boards common/ 下是符号链接），nuttx 仓 esp32s3-eye/src/ 的同名副本从不参与编译。

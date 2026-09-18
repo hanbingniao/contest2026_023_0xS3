@@ -96,9 +96,28 @@ PORT=/dev/ttyACM0 SET_TIME=1 \
 - 结论：这是 NuttX + esp32s3 WiFi 驱动层问题，非本项目应用层可完全规避，
   故比赛期间用有线传输保证演示稳定。
 
-## 7. 相关文件
+## 7. 上游（ai_agent）改动：编译前打补丁，上游 0 改动
+
+Agent 相关能力不直接改上游源码，全部放在 `patches/ai_agent/`，由
+`docs/tools/apply_nuttx_patches.sh` 在编译前打入 `packages/ai_agent`：
+
+- `0001-ask-queue-file-channel.patch`：`nsh_commands.c` 增加 `/tmp/vela-ask.txt`
+  文件队列通道（绕开串口下 nsh 与 agent 抢输入）。
+- `0002-outbound-reply-and-llm-io-lock-hooks.patch`：
+  - `agent_main.c`：outbound 回发处提供 `agent_set_reply_hook`（函数指针，未注册
+    空操作），设备侧据此把诊断结论写到 LCD 告警框并标记诊断完成；
+  - `llm_proxy.c`：LLM HTTP 调用前后提供 `llm_set_io_lock_hook`，设备侧注册
+    隧道全局锁，让 **LLM 大请求与看板/工具/后台采样共用同一把锁**，避免单条
+    半双工隧道抢道（这是"诊断后卡死"的根因修复）。
+
+两处均为"函数指针 + 未注册即空操作"，不改变上游默认行为，可独立编译。
+
+## 8. 相关文件
 
 - `app/hello_app/src/velaops_serial_tunnel.c` / `include/velaops_serial_tunnel.h`
 - `app/hello_app/src/velaops_autoconfig.c`（TRANSPORT 分支）
+- `app/hello_app/src/velaops_proxy_http_transport.c`（隧道请求全局互斥 + 有界锁）
+- `app/hello_app/src/velaops_agent_display.c`（Agent 回发 → LCD 告警框桥接）
 - `docs/tools/serial_llm_relay.py`（开发机 relay）
 - `docs/tools/install_demo_services.sh`（服务栈）
+- `patches/ai_agent/`（上游 ai_agent 补丁，编译前由 apply 脚本打入）
