@@ -10,6 +10,8 @@
 
 #include "velaops_proxy_http_transport.h"
 
+#include <pthread.h>
+
 #include <errno.h>
 #include <netdb.h>
 #include <stdbool.h>
@@ -24,6 +26,10 @@
 #define VELAOPS_HTTP_REQUEST_CAPACITY 2048
 #define VELAOPS_HTTP_HEADER_CAPACITY 2048
 #define VELAOPS_HTTP_DEFAULT_TIMEOUT_SECONDS 5
+
+/* 板端所有走隧道的 HTTP 请求串行化：看板巡检、Agent 只读工具、后台采样共用
+ * 同一条半双工隧道，必须排队，避免互相抢道导致帧交错/隧道卡死。 */
+static pthread_mutex_t g_http_transport_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bool velaops_safe_header_text(const char *text)
 {
@@ -226,13 +232,16 @@ int velaops_proxy_http_transport(
     {
       return -1;
     }
+  /* 串行化入口：同一时刻只允许一个隧道请求。 */
+  pthread_mutex_lock(&g_http_transport_lock);
+
   if (velaops_append(request, sizeof(request), &request_len,
                      "%s %s HTTP/1.1\r\n", method, target) != 0 ||
       velaops_append(request, sizeof(request), &request_len,
                      "Host: %s:%s\r\n", http_context->host,
                      http_context->port) != 0)
     {
-      return -1;
+      goto cleanup;
     }
   for (header = headers; header->name != NULL; header++)
     {
@@ -242,7 +251,7 @@ int velaops_proxy_http_transport(
           velaops_append(request, sizeof(request), &request_len,
                          "%s: %s\r\n", header->name, header->value) != 0)
         {
-          return -1;
+          goto cleanup;
         }
     }
   snprintf(content_length, sizeof(content_length), "%lu",
@@ -251,7 +260,7 @@ int velaops_proxy_http_transport(
                      "Content-Length: %s\r\nConnection: close\r\n\r\n",
                      content_length, "") != 0)
     {
-      return -1;
+      goto cleanup;
     }
 
   raw_capacity = VELAOPS_HTTP_HEADER_CAPACITY + response_capacity;
@@ -297,5 +306,6 @@ cleanup:
       close(fd);
     }
   free(raw);
+  pthread_mutex_unlock(&g_http_transport_lock);
   return status;
 }

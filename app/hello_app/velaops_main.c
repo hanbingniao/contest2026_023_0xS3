@@ -68,6 +68,7 @@
 #define VELAOPS_REPAIR_VERIFY_ATTEMPTS 5
 #define VELAOPS_ASK_QUEUE_PATH "/tmp/vela-ask.txt"
 #define VELAOPS_LLM_DONE_PATH "/tmp/velaops-llm-done"
+#define VELAOPS_LLM_BUSY_PATH "/tmp/velaops-llm-busy"
 #define VELAOPS_SKILL_PATH "/data/ai_agent/skills/server-incident-response.md"
 #define VELAOPS_LLM_PROMPT_CAPACITY 6144
 #define VELAOPS_LLM_SKILL_CAPACITY 4096
@@ -428,6 +429,17 @@ static int velaops_fetch_resources_for_agent(char *output,
       pthread_mutex_unlock(&g_agent_fetch_lock);
       return EXIT_SUCCESS;
     }
+  /* LLM 诊断期间：Agent 后台 5s 采样优先复用最近缓存（可过期），避免与大
+   * LLM 请求抢隧道；但没有缓存时仍照常请求（由传输层全局互斥排队），不能
+   * 因为诊断而让 Agent 自己的诊断工具取不到证据。 */
+  if (access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0 &&
+      g_agent_fetch_cache_at >= 0)
+    {
+      strncpy(output, g_agent_fetch_cache, output_capacity - 1);
+      output[output_capacity - 1] = '\0';
+      pthread_mutex_unlock(&g_agent_fetch_lock);
+      return EXIT_SUCCESS;
+    }
   status = velaops_post_request(VELAOPS_ACTION_TARGET,
                                 VELAOPS_CHECK_RESOURCES_BODY,
                                 NULL, false, true, NULL,
@@ -601,6 +613,15 @@ static int velaops_queue_llm_diagnosis(const char *resources)
    * 回发钩子写 /tmp/velaops-llm-done 触发；这里的秒数是兜底上限，防止
    * 模型异常/无回复时看板永久停摆。 */
   unlink(VELAOPS_LLM_DONE_PATH);
+  {
+    FILE *busy = fopen(VELAOPS_LLM_BUSY_PATH, "w");
+
+    if (busy != NULL)
+      {
+        fputs("busy", busy);
+        fclose(busy);
+      }
+  }
   g_llm_pause_until = time(NULL) + velaops_llm_pause_seconds();
   return 0;
 }
@@ -1097,6 +1118,7 @@ int main(int argc, char *argv[])
                   if (access(VELAOPS_LLM_DONE_PATH, F_OK) == 0)
                     {
                       unlink(VELAOPS_LLM_DONE_PATH);
+                      unlink(VELAOPS_LLM_BUSY_PATH);
                       g_llm_pause_until = 0;
                       next_refresh = time(NULL);
                     }
@@ -1108,6 +1130,9 @@ int main(int argc, char *argv[])
               else
                 {
                   velaops_display_state_t refreshed;
+
+                  /* 走出暂停分支说明诊断已结束（完成或兜底超时）。 */
+                  unlink(VELAOPS_LLM_BUSY_PATH);
                   char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
                   char diagnosis[VELAOPS_LOCAL_DIAGNOSIS_CAPACITY];
                   velaops_incident_event_t incident_event;
