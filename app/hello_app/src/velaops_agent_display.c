@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <syslog.h>
 
 #include "cJSON.h"
 
@@ -84,13 +85,14 @@ static void velaops_agent_map_display_text(const char *content, char *output,
         {
           snprintf(label, sizeof(label), "RETRY CHECK");
         }
-      else
+      else if (strcmp(action->valuestring, "none") != 0)
         {
           snprintf(label, sizeof(label), "%.15s", action->valuestring);
         }
     }
   else if (cJSON_IsString(status) && status->valuestring != NULL)
     {
+      /* 只在确有异常时覆盖告警框，避免模型误判 normal 把本地告警刷掉。 */
       if (strcmp(status->valuestring, "critical") == 0)
         {
           snprintf(label, sizeof(label), "CRITICAL");
@@ -98,10 +100,6 @@ static void velaops_agent_map_display_text(const char *content, char *output,
       else if (strcmp(status->valuestring, "warning") == 0)
         {
           snprintf(label, sizeof(label), "WARNING");
-        }
-      else
-        {
-          snprintf(label, sizeof(label), "OK");
         }
     }
 
@@ -139,6 +137,8 @@ void velaops_notify_agent_reply(const char *channel, const char *content)
 
   text[0] = '\0';
   velaops_agent_map_display_text(content, text, sizeof(text));
+  syslog(LOG_ERR, "velaops: agent 诊断回发 -> 告警框 [%s]\n",
+         text[0] != '\0' ? text : "（本地摘要保留）");
   if (text[0] == '\0')
     {
       return;
