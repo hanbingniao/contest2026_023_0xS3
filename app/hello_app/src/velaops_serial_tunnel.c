@@ -35,7 +35,9 @@
 #define VELAOPS_TUNNEL_MAX_ROUNDS 6
 #define VELAOPS_TUNNEL_ROUND_WAIT_MS 1500
 #define VELAOPS_TUNNEL_FAST_READY_MS 12000
-#define VELAOPS_TUNNEL_LLM_READY_MS 120000
+/* 必须大于 relay 的转发超时（180s）：否则本端先放弃并前进，随后会收到那条
+ * 陈旧响应造成错位/卡死。留足余量覆盖大上下文 LLM 请求。 */
+#define VELAOPS_TUNNEL_LLM_READY_MS 300000
 
 static const char g_b64[] =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

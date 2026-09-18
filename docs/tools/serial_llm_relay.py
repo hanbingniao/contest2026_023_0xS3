@@ -73,22 +73,62 @@ def _target_for(request: bytes) -> tuple[str, int]:
     return PROXY_HOST, PROXY_PORT
 
 
+# 转发超时后用合法 504 结束，避免板端拿到半截 HTTP 响应难以判断。
+_GATEWAY_TIMEOUT = (b"HTTP/1.1 504 Gateway Timeout\r\n"
+                    b"Content-Length: 0\r\nConnection: close\r\n\r\n")
+
+# 转发放到工作线程：主循环必须持续 ACK/收帧，否则慢上游会让板端重传超限。
+_FORWARD_TIMEOUT = float(os.environ.get("RELAY_FORWARD_TIMEOUT", "90"))
+_forward_queue: "queue.Queue[tuple[int, bytes]]" = queue.Queue()
+_latest_xid = 0
+_latest_xid_lock = threading.Lock()
+
+
 def _forward(request: bytes) -> bytes:
     host, port = _target_for(request)
-    with socket.create_connection((host, port), timeout=180) as s:
+    with socket.create_connection((host, port),
+                                  timeout=_FORWARD_TIMEOUT) as s:
         s.sendall(request)
         s.shutdown(socket.SHUT_WR)
         chunks = []
-        s.settimeout(180)
+        s.settimeout(_FORWARD_TIMEOUT)
         while True:
             try:
                 data = s.recv(4096)
             except socket.timeout:
-                break
+                # 半截响应没有意义：用 504 让板端干净失败/降级。
+                return _GATEWAY_TIMEOUT
             if not data:
                 break
             chunks.append(data)
     return b"".join(chunks)
+
+
+def _forward_worker(fd: int) -> None:
+    while True:
+        xid, request = _forward_queue.get()
+        try:
+            response = _forward(request)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[relay] 转发失败: {exc}\n")
+            sys.stderr.flush()
+            response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+
+        with _latest_xid_lock:
+            current = _latest_xid
+        if current != xid:
+            # 板端已经前进到新 xid，说明这条响应已被放弃：丢弃，避免错位。
+            sys.stderr.write(
+                f"[relay] {time.strftime('%H:%M:%S')} 丢弃陈旧响应 "
+                f"xid={xid}（当前 {current}）\n")
+            sys.stderr.flush()
+            continue
+        _push_b64(fd, base64.b64encode(response), B64_REMOTE)
+        _write_nsh(fd, f"echo x > {READY_REMOTE}")
+        sys.stderr.write(
+            f"[relay] {time.strftime('%H:%M:%S')} 已回写响应 "
+            f"{len(response)} 字节 xid={xid}\n")
+        sys.stderr.flush()
 
 
 def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
@@ -131,9 +171,17 @@ def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
             if marker_vf >= 0:
                 parts = line[marker_vf + 5:].split()
                 try:
-                    events.put(("H", int(parts[0]), int(parts[1])))
+                    xid = int(parts[0])
+                    nchunks = int(parts[1])
                 except (ValueError, IndexError):
                     pass
+                else:
+                    # 记录板端最新 xid：响应推送前据此判断是否已被放弃。
+                    global _latest_xid
+                    with _latest_xid_lock:
+                        if xid > _latest_xid:
+                            _latest_xid = xid
+                    events.put(("H", xid, nchunks))
             elif marker_vc >= 0:
                 # 控制台可能把别的日志拼在行首，只取标记之后并按字段关键字解析。
                 parts = line[marker_vc + 5:].split(b" ")
@@ -285,6 +333,7 @@ def main() -> int:
             sys.stderr.flush()
 
     threading.Thread(target=_bootstrap, daemon=True).start()
+    threading.Thread(target=_forward_worker, args=(fd,), daemon=True).start()
 
     pending: dict[int, dict] = {}
     while True:
@@ -333,41 +382,14 @@ def main() -> int:
                     sys.stderr.write(f"[relay] base64 解码失败: {exc}\n")
                     _write_nsh(fd, f"echo 0 > {NACK_REMOTE}")
                     continue
-                target = _target_for(request)
                 first_line = request.split(b"\r\n", 1)[0]
-                req_id = b""
-                for header_line in request.split(b"\r\n"):
-                    if header_line.lower().startswith(b"x-velaops-request-id:"):
-                        req_id = header_line.split(b":", 1)[1].strip()
-                        break
                 sys.stderr.write(
-                    f"[relay] {time.strftime('%H:%M:%S')} 收妥 {len(request)}B {first_line!r} -> {target}\n")
+                    f"[relay] {time.strftime('%H:%M:%S')} 收妥 "
+                    f"{len(request)}B {first_line!r}，转交工作线程 xid={xid}\n")
                 sys.stderr.flush()
-                try:
-                    response = _forward(request)
-                except Exception as exc:  # noqa: BLE001
-                    sys.stderr.write(f"[relay] 转发失败: {exc}\n")
-                    response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
-                import json as _json
-                try:
-                    body = response.split(b"\r\n\r\n", 1)[1]
-                    resp_id = str(_json.loads(body).get("request_id", "")).encode()
-                except Exception:  # noqa: BLE001
-                    resp_id = b"?"
-                sys.stderr.write(
-                    f"[relay] {time.strftime('%H:%M:%S')} 响应 {len(response)}B "
-                    f"req_id={req_id.decode(errors='replace')} "
-                    f"resp_id={resp_id.decode(errors='replace')} "
-                    f"{'OK' if req_id == resp_id else 'MISMATCH'}\n")
-                if os.environ.get("RELAY_DUMP", "0") == "1":
-                    sys.stderr.write(
-                        "[relay] 响应体: " + repr(response[:1600]) + "\n")
-                sys.stderr.flush()
-                # 直接回写并置 READY：回读校验会让 relay 变忙、加剧 ACK/READY 竞态。
-                _push_b64(fd, base64.b64encode(response), B64_REMOTE)
-                _write_nsh(fd, f"echo x > {READY_REMOTE}")
-                sys.stderr.write(f"[relay] {time.strftime('%H:%M:%S')} 已回写响应 {len(response)} 字节\n")
-                sys.stderr.flush()
+                # 转发在工作线程做，主循环继续 ACK/收帧；响应是否推送由
+                # 工作线程按"当前 xid"判定（过期即丢弃）。
+                _forward_queue.put((xid, request))
             else:
                 entry["round"] += 1
                 if entry["round"] > MAX_ROUNDS:
