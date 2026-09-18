@@ -108,6 +108,16 @@ void velaops_notify_agent_reply(const char *channel, const char *content)
   (void)content;
 }
 
+/* 主机测试不链接 llm_proxy.c / 传输层：提供 LLM 锁钩子桩。 */
+void llm_set_io_lock_hook(void (*lock_fn)(void), void (*unlock_fn)(void))
+{
+  (void)lock_fn;
+  (void)unlock_fn;
+}
+
+void velaops_tunnel_lock(void) {}
+void velaops_tunnel_unlock(void) {}
+
 int velaops_screen_show_message(const char *text)
 {
   EXPECT(text != NULL);

@@ -22,6 +22,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <syslog.h>
 #include <unistd.h>
 
 #define VELAOPS_HTTP_REQUEST_CAPACITY 2048
@@ -46,6 +47,29 @@ static int velaops_http_lock(void)
   deadline.tv_sec += VELAOPS_HTTP_LOCK_TIMEOUT_SECONDS;
   return pthread_mutex_timedlock(&g_http_transport_lock, &deadline) == 0 ?
          0 : -1;
+}
+
+/* 供 ai_agent 的 LLM HTTP 路径调用：让 LLM 大请求与团队隧道请求共用同一把锁，
+ * 避免单条半双工隧道上互相抢道。超时未能取锁则降级为不加锁（并记录），避免
+ * 把 LLM 调用卡死。 */
+static int g_llm_tunnel_locked;
+
+void velaops_tunnel_lock(void)
+{
+  g_llm_tunnel_locked = velaops_http_lock() == 0;
+  if (!g_llm_tunnel_locked)
+    {
+      syslog(LOG_ERR, "velaops: LLM 隧道加锁超时，降级放行\n");
+    }
+}
+
+void velaops_tunnel_unlock(void)
+{
+  if (g_llm_tunnel_locked)
+    {
+      g_llm_tunnel_locked = 0;
+      pthread_mutex_unlock(&g_http_transport_lock);
+    }
 }
 
 static bool velaops_safe_header_text(const char *text)
