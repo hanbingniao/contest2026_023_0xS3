@@ -53,6 +53,14 @@ class CpuSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ProcessSnapshot:
+    """CPU 占用最高的进程（用于让 LLM 指出"是谁在吃 CPU"）。"""
+
+    name: str
+    cpu_percent: float
+
+
+@dataclass(frozen=True, slots=True)
 class LogSnapshot:
     text: str
     truncated: bool
@@ -80,6 +88,8 @@ class SystemInspector(Protocol):
     def memory_usage(self) -> MemorySnapshot: ...
 
     def cpu_usage(self) -> CpuSnapshot: ...
+
+    def top_process(self) -> ProcessSnapshot: ...
 
     def service_log(self, service: ServiceConfig, lines: int) -> LogSnapshot: ...
 
@@ -151,6 +161,7 @@ class ReadOnlyDiagnostics:
         port_snapshot = self._inspector.check_port(endpoint.host, endpoint.port)
         return ActionResult.of(
             cpu=asdict(self._inspector.cpu_usage()),
+            top_process=asdict(self._inspector.top_process()),
             memory=asdict(self._inspector.memory_usage()),
             disk={"alias": disk, **asdict(disk_snapshot)},
             service={"alias": service, **asdict(service_snapshot)},

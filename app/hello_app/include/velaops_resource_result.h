@@ -20,12 +20,20 @@ typedef struct
 
 typedef struct
 {
+  char name[32];
+  double cpu_percent;
+  bool valid;
+} velaops_process_observation_t;
+
+typedef struct
+{
   velaops_memory_observation_t memory;
   double disk_percent;
   bool service_active;
   bool port_reachable;
   int port_latency_ms;
   velaops_cpu_observation_t cpu;
+  velaops_process_observation_t process;
 } velaops_resource_observation_t;
 
 int velaops_resource_result_parse(const char *result_json,
