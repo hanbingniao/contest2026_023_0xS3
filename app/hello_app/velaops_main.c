@@ -67,12 +67,13 @@
 #define VELAOPS_REPAIR_RESULT_CAPACITY 320
 #define VELAOPS_REPAIR_VERIFY_ATTEMPTS 5
 #define VELAOPS_ASK_QUEUE_PATH "/tmp/vela-ask.txt"
+#define VELAOPS_LLM_DONE_PATH "/tmp/velaops-llm-done"
 #define VELAOPS_SKILL_PATH "/data/ai_agent/skills/server-incident-response.md"
 #define VELAOPS_LLM_PROMPT_CAPACITY 6144
 #define VELAOPS_LLM_SKILL_CAPACITY 4096
 /* 串口隧道是单连接半双工：Agent 的 LLM 诊断请求与看板巡检并发会让隧道卡死。
  * 入队 LLM 诊断后暂停巡检该窗口，等诊断完成再恢复；可用环境变量覆盖以便联调。 */
-#define VELAOPS_LLM_PAUSE_DEFAULT_SECONDS 90
+#define VELAOPS_LLM_PAUSE_DEFAULT_SECONDS 240
 
 static volatile time_t g_llm_pause_until;
 
@@ -596,7 +597,10 @@ static int velaops_queue_llm_diagnosis(const char *resources)
   fwrite(prompt, 1, strlen(prompt), file);
   fclose(file);
 
-  /* 让看板巡检在 LLM 诊断窗口内退避，避免与 Agent 抢单条隧道。 */
+  /* 让看板巡检在 LLM 诊断期间退避，避免与 Agent 抢单条隧道。回归由 Agent
+   * 回发钩子写 /tmp/velaops-llm-done 触发；这里的秒数是兜底上限，防止
+   * 模型异常/无回复时看板永久停摆。 */
+  unlink(VELAOPS_LLM_DONE_PATH);
   g_llm_pause_until = time(NULL) + velaops_llm_pause_seconds();
   return 0;
 }
@@ -610,7 +614,60 @@ struct velaops_button_context_s
   velaops_display_t *display;
   velaops_display_state_t *state;
   pthread_mutex_t *display_lock;
+  int *alarm_active;
 };
+
+/* 异常告警框：优先显示 Agent/LLM 推送到事件文件的内容，否则用本地规则摘要。
+ * 文本必须是可打印 ASCII（屏显 5x7 字库限制），最长约 24 字符，分两行。 */
+static bool velaops_monitor_consume_popup(char *buffer, size_t capacity)
+{
+  FILE *file;
+  size_t length;
+
+  file = fopen("/tmp/velaops-popup.txt", "r");
+  if (file == NULL)
+    {
+      return false;
+    }
+  length = fread(buffer, 1, capacity - 1, file);
+  fclose(file);
+  buffer[length] = '\0';
+  unlink("/tmp/velaops-popup.txt");
+  return length > 0;
+}
+
+static void velaops_monitor_alarm_summary(
+    const velaops_resource_observation_t *resources, char *buffer,
+    size_t capacity)
+{
+  if (!resources->service_active)
+    {
+      snprintf(buffer, capacity, "SERVICE DOWN");
+    }
+  else if (!resources->port_reachable)
+    {
+      snprintf(buffer, capacity, "PORT CLOSED");
+    }
+  else if (resources->disk_percent >= 90.0)
+    {
+      snprintf(buffer, capacity, "DISK %d%% HIGH",
+               (int)(resources->disk_percent + 0.5));
+    }
+  else if (resources->memory.used_percent >= 80.0)
+    {
+      snprintf(buffer, capacity, "MEM %d%% HIGH",
+               (int)(resources->memory.used_percent + 0.5));
+    }
+  else if (resources->cpu.valid && resources->cpu.used_percent >= 90.0)
+    {
+      snprintf(buffer, capacity, "CPU %d%% HIGH",
+               (int)(resources->cpu.used_percent + 0.5));
+    }
+  else
+    {
+      snprintf(buffer, capacity, "RESOURCE ALERT");
+    }
+}
 
 /* 巡检连续失败：只记录，不触碰网络接口（运行期改接口历来只会让情况更糟）。
  * 串口模式下多为 relay 未运行；WiFi 模式下为链路掉线。 */
@@ -647,31 +704,6 @@ static unsigned int velaops_monitor_startup_delay(void)
   return delay;
 }
 
-static bool velaops_monitor_show_popup(velaops_display_t *display)
-{
-  FILE *file;
-  char message[25];
-  size_t length;
-
-  file = fopen("/tmp/velaops-popup.txt", "r");
-  if (file == NULL)
-    {
-      return false;
-    }
-
-  length = fread(message, 1, sizeof(message) - 1, file);
-  fclose(file);
-  message[length] = '\0';
-  if (length == 0 || velaops_display_show_message(
-                         display, "AGENT MESSAGE", message, 0) != 0)
-    {
-      return false;
-    }
-
-  unlink("/tmp/velaops-popup.txt");
-  return true;
-}
-
 static void *velaops_button_worker(void *argument)
 {
   struct velaops_button_context_s *context = argument;
@@ -685,10 +717,19 @@ static void *velaops_button_worker(void *argument)
               (context->previous & context->supported) == 0)
             {
               pthread_mutex_lock(context->display_lock);
-              *context->page =
-                  (*context->page + 1) % VELAOPS_DISPLAY_PAGE_COUNT;
-              velaops_display_show(context->display, context->state,
-                                   *context->page);
+              if (context->alarm_active != NULL &&
+                  *context->alarm_active != 0)
+                {
+                  /* 告警弹窗优先：短按 BOOT 先消除弹窗，回到看板。 */
+                  *context->alarm_active = 0;
+                }
+              else
+                {
+                  *context->page =
+                      (*context->page + 1) % VELAOPS_DISPLAY_PAGE_COUNT;
+                  velaops_display_show(context->display, context->state,
+                                       *context->page);
+                }
               pthread_mutex_unlock(context->display_lock);
             }
           context->previous = sample;
@@ -991,6 +1032,12 @@ int main(int argc, char *argv[])
       pthread_t button_thread;
       pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
       struct velaops_button_context_s button_context;
+      int alarm_active = 0;
+      int was_alarm = 0;
+      int force_render = 1;
+      int blink_phase = 0;
+      int blink_tick = 0;
+      char alarm_text[25] = {0};
 
       if (velaops_resource_incident_init(
               &resource_incident, VELAOPS_INCIDENT_FAILURE_THRESHOLD,
@@ -1026,6 +1073,7 @@ int main(int argc, char *argv[])
       button_context.display = display;
       button_context.state = &state;
       button_context.display_lock = &display_lock;
+      button_context.alarm_active = &alarm_active;
       if (pthread_create(&button_thread, NULL, velaops_button_worker,
                          &button_context) != 0)
         {
@@ -1040,100 +1088,179 @@ int main(int argc, char *argv[])
         {
           if (time(NULL) >= next_refresh)
             {
-              velaops_display_state_t refreshed;
-              char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
-              char diagnosis[VELAOPS_LOCAL_DIAGNOSIS_CAPACITY];
-              velaops_incident_event_t incident_event;
-              velaops_resource_incident_status_t incident_status;
-              int request_status;
-
               /* LLM 诊断窗口内让路：隧道同一时刻只能服务一个请求，
                * 若与看板巡检并发会导致隧道卡死。 */
               if (g_llm_pause_until > 0 &&
                   time(NULL) < g_llm_pause_until)
                 {
-                  next_refresh = g_llm_pause_until;
-                  sleep(1);
-                  continue;
-                }
-
-              /* 网络请求可能阻塞数秒。只在线程私有副本上更新，完成后再
-               * 一次性交给显示线程，避免 BOOT 翻页读到半更新状态。
-               */
-
-              pthread_mutex_lock(&display_lock);
-              refreshed = state;
-              pthread_mutex_unlock(&display_lock);
-              /* 看板周期巡检静默：每 5s 打印整段 JSON 会与串口 LLM 隧道的
-               * base64 帧交错，且刷屏影响联调。仅在事件/失败时打印。 */
-              request_status = velaops_post_request(
-                  VELAOPS_ACTION_TARGET, VELAOPS_CHECK_RESOURCES_BODY,
-                  NULL, false, false, &refreshed,
-                  resources, sizeof(resources));
-              if (request_status == EXIT_SUCCESS)
-                {
-                  consecutive_failures = 0;
-                  incident_status =
-                      velaops_resource_incident_apply_observation(
-                          &resource_incident, &refreshed.resources,
-                          refreshed.observed_at, &incident_event, diagnosis,
-                          sizeof(diagnosis));
-                  if (incident_status == VELAOPS_RESOURCE_INCIDENT_OK &&
-                      incident_event != VELAOPS_INCIDENT_EVENT_NONE)
+                  /* Agent 回发钩子标记诊断完成即放行，否则等到兜底上限。 */
+                  if (access(VELAOPS_LLM_DONE_PATH, F_OK) == 0)
                     {
-                      printf("velaops: proactive_event type=%s generation=%lu "
-                             "diagnosis=%s\n",
-                             incident_event == VELAOPS_INCIDENT_EVENT_OPENED ?
-                             "opened" : "recovered",
-                             (unsigned long)resource_incident.tracker.generation,
-                             diagnosis);
-
-                      /* 主动异常：用已经取到的证据主动发起一次单轮 LLM
-                       * 诊断（不额外请求，避免连续大流量）。 */
-                      if (incident_event == VELAOPS_INCIDENT_EVENT_OPENED &&
-                          velaops_queue_llm_diagnosis(resources) == 0)
-                        {
-                          printf("velaops: 已主动入队单次 LLM 诊断请求\n");
-                        }
+                      unlink(VELAOPS_LLM_DONE_PATH);
+                      g_llm_pause_until = 0;
+                      next_refresh = time(NULL);
                     }
-
-                  /* 联调触发：`echo x > /tmp/velaops-diagnose` 后，由看板
-                   * 任务用刚取到的证据入队一次单轮 LLM 诊断。放在看板任务里
-                   * 执行，避免 NSH 任务与看板并发访问网络。 */
-                  if (access("/tmp/velaops-diagnose", F_OK) == 0)
+                  else
                     {
-                      unlink("/tmp/velaops-diagnose");
-                      if (velaops_queue_llm_diagnosis(resources) == 0)
-                        {
-                          printf("velaops: 已入队单次 LLM 诊断请求\n");
-                        }
-                      else
-                        {
-                          printf("velaops: LLM 诊断入队失败\n");
-                        }
+                      next_refresh = g_llm_pause_until;
                     }
                 }
-              else if (++consecutive_failures >=
-                       VELAOPS_MONITOR_REPAIR_AFTER_FAILURES)
+              else
                 {
-                  velaops_monitor_repair_network(false);
-                  consecutive_failures = 0;
+                  velaops_display_state_t refreshed;
+                  char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
+                  char diagnosis[VELAOPS_LOCAL_DIAGNOSIS_CAPACITY];
+                  velaops_incident_event_t incident_event;
+                  velaops_resource_incident_status_t incident_status;
+                  int request_status;
+
+                  /* 网络请求可能阻塞数秒。只在线程私有副本上更新，完成后再
+                   * 一次性交给显示线程，避免 BOOT 翻页读到半更新状态。 */
+                  pthread_mutex_lock(&display_lock);
+                  refreshed = state;
+                  pthread_mutex_unlock(&display_lock);
+
+                  request_status = velaops_post_request(
+                      VELAOPS_ACTION_TARGET, VELAOPS_CHECK_RESOURCES_BODY,
+                      NULL, false, false, &refreshed,
+                      resources, sizeof(resources));
+                  if (request_status == EXIT_SUCCESS)
+                    {
+                      consecutive_failures = 0;
+                      incident_status =
+                          velaops_resource_incident_apply_observation(
+                              &resource_incident, &refreshed.resources,
+                              refreshed.observed_at, &incident_event,
+                              diagnosis, sizeof(diagnosis));
+                      if (incident_status == VELAOPS_RESOURCE_INCIDENT_OK &&
+                          incident_event != VELAOPS_INCIDENT_EVENT_NONE)
+                        {
+                          printf("velaops: proactive_event type=%s "
+                                 "generation=%lu diagnosis=%s\n",
+                                 incident_event ==
+                                 VELAOPS_INCIDENT_EVENT_OPENED ?
+                                 "opened" : "recovered",
+                                 (unsigned long)
+                                 resource_incident.tracker.generation,
+                                 diagnosis);
+
+                          /* 异常开单：自动弹出闪烁告警框，先用本地规则摘要；
+                           * Agent/LLM 返回后经事件文件替换为建议文本。恢复正常
+                           * 则自动收起。短按 BOOT 可随时消除。 */
+                          pthread_mutex_lock(&display_lock);
+                          if (incident_event ==
+                              VELAOPS_INCIDENT_EVENT_OPENED)
+                            {
+                              velaops_monitor_alarm_summary(
+                                  &refreshed.resources, alarm_text,
+                                  sizeof(alarm_text));
+                              alarm_active = 1;
+                            }
+                          else
+                            {
+                              alarm_active = 0;
+                            }
+                          pthread_mutex_unlock(&display_lock);
+
+                          /* 主动异常：用已经取到的证据主动发起一次单轮 LLM
+                           * 诊断（不额外请求，避免连续大流量）。 */
+                          if (incident_event ==
+                                  VELAOPS_INCIDENT_EVENT_OPENED &&
+                              velaops_queue_llm_diagnosis(resources) == 0)
+                            {
+                              printf("velaops: 已主动入队单次 LLM 诊断请求\n");
+                            }
+                        }
+
+                      /* 联调触发：`echo x > /tmp/velaops-diagnose` 后，由看板
+                       * 任务用刚取到的证据入队一次单轮 LLM 诊断。放在看板任务里
+                       * 执行，避免 NSH 任务与看板并发访问网络。 */
+                      if (access("/tmp/velaops-diagnose", F_OK) == 0)
+                        {
+                          unlink("/tmp/velaops-diagnose");
+                          if (velaops_queue_llm_diagnosis(resources) == 0)
+                            {
+                              printf("velaops: 已入队单次 LLM 诊断请求\n");
+                            }
+                          else
+                            {
+                              printf("velaops: LLM 诊断入队失败\n");
+                            }
+                        }
+                    }
+                  else if (++consecutive_failures >=
+                           VELAOPS_MONITOR_REPAIR_AFTER_FAILURES)
+                    {
+                      velaops_monitor_repair_network(false);
+                      consecutive_failures = 0;
+                    }
+                  /* 只在成功巡检时追加 CPU 历史，失败轮保持曲线连续。 */
+                  if (request_status == EXIT_SUCCESS)
+                    {
+                      velaops_dashboard_push_cpu(&refreshed);
+                    }
+                  pthread_mutex_lock(&display_lock);
+                  state = refreshed;
+                  pthread_mutex_unlock(&display_lock);
+                  force_render = 1;
+                  next_refresh =
+                      time(NULL) + VELAOPS_MONITOR_INTERVAL_SECONDS;
                 }
-              /* 只在成功巡检时追加 CPU 历史，失败轮保持曲线连续。 */
-              if (request_status == EXIT_SUCCESS)
-                {
-                  velaops_dashboard_push_cpu(&refreshed);
-                }
-              pthread_mutex_lock(&display_lock);
-              state = refreshed;
-              if (!velaops_monitor_show_popup(display))
-                {
-                  velaops_display_show(display, &state, page);
-                }
-              pthread_mutex_unlock(&display_lock);
-              next_refresh = time(NULL) + VELAOPS_MONITOR_INTERVAL_SECONDS;
             }
-          sleep(1);
+
+          /* Agent/LLM 推送到事件文件的短消息：替换告警文本并保持弹窗。 */
+          {
+            char pushed[25];
+
+            if (velaops_monitor_consume_popup(pushed, sizeof(pushed)))
+              {
+                pthread_mutex_lock(&display_lock);
+                memcpy(alarm_text, pushed, sizeof(alarm_text));
+                alarm_text[sizeof(alarm_text) - 1] = '\0';
+                alarm_active = 1;
+                pthread_mutex_unlock(&display_lock);
+                force_render = 1;
+              }
+          }
+
+          if (alarm_active)
+            {
+              if (++blink_tick >= 2)
+                {
+                  blink_tick = 0;
+                  blink_phase ^= 1;
+                  force_render = 1;
+                }
+            }
+          else if (was_alarm)
+            {
+              force_render = 1;
+            }
+
+          if (force_render)
+            {
+              pthread_mutex_lock(&display_lock);
+              velaops_display_state_t snapshot = state;
+              unsigned int page_snapshot = page;
+              int active = alarm_active;
+              char text[25];
+
+              memcpy(text, alarm_text, sizeof(text));
+              pthread_mutex_unlock(&display_lock);
+
+              if (active)
+                {
+                  velaops_display_show_message(display, "ALERT", text,
+                                               blink_phase);
+                }
+              else
+                {
+                  velaops_display_show(display, &snapshot, page_snapshot);
+                }
+              force_render = 0;
+            }
+          was_alarm = alarm_active;
+          usleep(200000);
         }
     }
 
