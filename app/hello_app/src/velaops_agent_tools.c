@@ -228,6 +228,17 @@ int velaops_agent_tools_register(
   g_resource_fetcher = fetcher;
   g_monitor_starter = monitor_starter;
   g_service_repairer = repairer;
+
+  /* 注册"Agent 回发 → LCD 告警框/诊断完成"钩子（见 velaops_agent_display.c）。
+   * 上游 agent_main.c 提供 agent_set_reply_hook，这里用函数指针注入强实现。 */
+  {
+    extern void agent_set_reply_hook(void (*hook)(const char *, const char *));
+    extern void velaops_notify_agent_reply(const char *channel,
+                                           const char *content);
+
+    agent_set_reply_hook(velaops_notify_agent_reply);
+  }
+
   if (!g_provider_registered)
     {
       tool_registry_register_provider("velaops",

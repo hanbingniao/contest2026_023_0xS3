@@ -28,6 +28,7 @@ CSRCS += src/velaops_local_diagnosis.c
 CSRCS += src/velaops_resource_incident.c
 CSRCS += src/velaops_agent_tools.c
 CSRCS += src/velaops_agent_monitor.c
+CSRCS += src/velaops_agent_display.c
 CSRCS += src/velaops_approval.c
 CSRCS += src/velaops_button_approval.c
 CSRCS += src/velaops_guarded_repair.c
