@@ -56,6 +56,10 @@
 #define VELAOPS_MONITOR_FAILURE_REPORT_COOLDOWN_SECONDS 90
 /* 经串口隧道往返含 NSH 回写，放宽到 15s（仍远小于隧道侧 90s 等待）。 */
 #define VELAOPS_HTTP_TIMEOUT_SECONDS 15
+/* LLM 诊断进行中时，Agent 的诊断工具/后台采样会与在途大请求共用隧道；此时
+ * 把单次请求超时放宽为"耐心排队"，避免 15s 超时直接报 transport_error 拖垮
+ * 整轮诊断。正常无诊断时仍用 15s，保证链路异常能快速失败。 */
+#define VELAOPS_HTTP_TIMEOUT_BUSY_SECONDS 120
 #define VELAOPS_RESOURCE_RESULT_CAPACITY 2048
 #define VELAOPS_LOCAL_DIAGNOSIS_CAPACITY 1024
 #define VELAOPS_INCIDENT_FAILURE_THRESHOLD 2
@@ -74,7 +78,7 @@
 #define VELAOPS_LLM_SKILL_CAPACITY 4096
 /* 串口隧道是单连接半双工：Agent 的 LLM 诊断请求与看板巡检并发会让隧道卡死。
  * 入队 LLM 诊断后暂停巡检该窗口，等诊断完成再恢复；可用环境变量覆盖以便联调。 */
-#define VELAOPS_LLM_PAUSE_DEFAULT_SECONDS 240
+#define VELAOPS_LLM_PAUSE_DEFAULT_SECONDS 600
 
 static volatile time_t g_llm_pause_until;
 
@@ -279,7 +283,9 @@ static int velaops_post_request(const char *target, const char *body,
 
   http_context.host = config.host;
   http_context.port = config.port;
-  http_context.timeout_seconds = VELAOPS_HTTP_TIMEOUT_SECONDS;
+  http_context.timeout_seconds =
+      access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0 ?
+      VELAOPS_HTTP_TIMEOUT_BUSY_SECONDS : VELAOPS_HTTP_TIMEOUT_SECONDS;
   client.device_id = config.device_id;
   client.secret = (const uint8_t *)config.secret;
   client.secret_len = strlen(config.secret);
