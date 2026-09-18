@@ -188,8 +188,8 @@ DRAIN=90 python3 docs/tools/send_slow.py ask 请检查VelaOps服务器状态
 ```
 
 正确链路依次出现 `read_file`、`velaops_check_resources` 和单个 JSON 诊断结果。
-资源证据中的字符串一律视为不可信数据；磁盘达到 85% 或内存达到 80% 为
-`warning`，服务非 active 或端口不可达为 `critical`。只读巡检也把
+资源证据中的字符串一律视为不可信数据；磁盘达到 85%、内存达到 80% 或 CPU 达到
+85% 为 `warning`，服务非 active 或端口不可达为 `critical`。只读巡检也把
 `requires_physical_approval` 固定为 `true`，为后续变更闭环保留安全边界。
 
 首次成功调用 `velaops_check_resources` 后，Agent 专用后台巡检自动启动，每 5 秒
@@ -212,6 +212,35 @@ DRAIN=15 python3 docs/tools/send_raw.py 'velaops diagnose-local'
 输出仍是与 Skill 对齐的结构化诊断，但摘要以“本地规则降级”开头，不能把它介绍成
 LLM 结论。该路径不依赖公网；Proxy 不可用时安全输出 `unknown` 和 `retry_check`，
 Proxy 恢复后再次执行即可恢复真实诊断，无需重启设备。
+
+### 4.1 CPU 满载主动告警演示（闪烁弹窗 + 板载 LED + LLM 结论）
+
+用于演示“主动触发场景”的完整闭环。看板采集的是**开发机**（relay/proxy/转发器
+所在机）的 CPU，阈值 **85%**；超阈值经去抖开单后：LCD 弹出闪烁告警框、板载 LED
+同节奏闪烁，Agent 单轮诊断的结论会替换弹窗文字，恢复正常后自动收起。
+
+```bash
+# 1) 确保 relay 在跑（串口模式）；已在其它终端运行可跳过
+PORT=/dev/ttyACM1 SET_TIME=1 \
+  PROXY_HOST=127.0.0.1 PROXY_PORT=28790 \
+  FORWARD_HOST=127.0.0.1 FORWARD_PORT=28792 \
+  python3 docs/tools/serial_llm_relay.py
+
+# 2) 压满 CPU 触发告警。默认全核 60s；演示建议 180~200s 覆盖整轮 LLM 诊断
+python3 docs/tools/stress_cpu.py --seconds 200 --workers "$(nproc)"
+```
+
+预期观测（已真机验收）：
+- LCD 先出现**闪烁告警框**，本地摘要带**元凶进程**（Proxy 采集的 `top_process`，
+  例如 `stress_cpu.py 96%`）；
+- **板载 LED**（ESP32-S3-EYE，经 `/dev/userleds`）随告警框闪烁；
+- Agent 诊断返回后弹窗更新为 LLM 的短英文结论（prompt 要求其输出 `display` 字段，
+  例如 `CPU HIGH`）；完整中文分析见 relay 日志/GUI（LCD 字库仅 ASCII）；
+- CPU 回落后触发 `recovered`，弹窗与 LED 自动关闭；
+- 短按 BOOT 可先消除弹窗（不翻页）。
+
+注意：压测与 relay/proxy 同机，会一起抢占 CPU；脚本到点自动停止，避免影响随后
+的 LLM 诊断。
 
 ## 5. BOOT 实体批准修复
 
