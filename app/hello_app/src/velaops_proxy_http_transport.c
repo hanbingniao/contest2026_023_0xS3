@@ -11,6 +11,7 @@
 #include "velaops_proxy_http_transport.h"
 
 #include <pthread.h>
+#include <time.h>
 
 #include <errno.h>
 #include <netdb.h>
@@ -26,10 +27,26 @@
 #define VELAOPS_HTTP_REQUEST_CAPACITY 2048
 #define VELAOPS_HTTP_HEADER_CAPACITY 2048
 #define VELAOPS_HTTP_DEFAULT_TIMEOUT_SECONDS 5
+#define VELAOPS_HTTP_LOCK_TIMEOUT_SECONDS 130
 
 /* 板端所有走隧道的 HTTP 请求串行化：看板巡检、Agent 只读工具、后台采样共用
- * 同一条半双工隧道，必须排队，避免互相抢道导致帧交错/隧道卡死。 */
+ * 同一条半双工隧道，必须排队，避免互相抢道导致帧交错/隧道卡死。
+ * 用有界加锁：持有者最长只在一次请求内占用（诊断期 120s），超时则放弃本次
+ * 请求而不是永久阻塞整条看板。 */
 static pthread_mutex_t g_http_transport_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int velaops_http_lock(void)
+{
+  struct timespec deadline;
+
+  if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+    {
+      return pthread_mutex_lock(&g_http_transport_lock);
+    }
+  deadline.tv_sec += VELAOPS_HTTP_LOCK_TIMEOUT_SECONDS;
+  return pthread_mutex_timedlock(&g_http_transport_lock, &deadline) == 0 ?
+         0 : -1;
+}
 
 static bool velaops_safe_header_text(const char *text)
 {
@@ -232,8 +249,11 @@ int velaops_proxy_http_transport(
     {
       return -1;
     }
-  /* 串行化入口：同一时刻只允许一个隧道请求。 */
-  pthread_mutex_lock(&g_http_transport_lock);
+  /* 串行化入口：同一时刻只允许一个隧道请求；有界等待，避免永久阻塞。 */
+  if (velaops_http_lock() != 0)
+    {
+      return -1;
+    }
 
   if (velaops_append(request, sizeof(request), &request_len,
                      "%s %s HTTP/1.1\r\n", method, target) != 0 ||

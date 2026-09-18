@@ -442,6 +442,13 @@ int velaops_serial_tunnel_run(void)
         }
       setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+      /* 自愈：新连接到来先清空上一轮可能残留的帧状态，避免读到陈旧
+       * 响应/ACK 或把上一轮的残留当成本轮结果。 */
+      unlink(VELAOPS_TUNNEL_IN_READY);
+      unlink(VELAOPS_TUNNEL_IN_B64);
+      unlink(VELAOPS_TUNNEL_ACK);
+      unlink(VELAOPS_TUNNEL_NACK);
+
       if (velaops_tunnel_read_request(client, &request, &request_len) != 0)
         {
           close(client);
