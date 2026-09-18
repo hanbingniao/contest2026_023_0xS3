@@ -11,6 +11,7 @@ if(CONFIG_LVX_USE_DEMO_CONTEST2026_023_VELAOPS)
     src/velaops_resource_incident.c
     src/velaops_agent_tools.c
     src/velaops_agent_monitor.c
+    src/velaops_agent_display.c
     src/velaops_approval.c
     src/velaops_button_approval.c
     src/velaops_guarded_repair.c
