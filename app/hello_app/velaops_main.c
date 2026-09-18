@@ -589,6 +589,10 @@ static int velaops_queue_llm_diagnosis(const char *resources)
   written = snprintf(
       prompt, sizeof(prompt),
       "你是 VelaOps 运维诊断 Agent，执行 server-incident-response Skill。\n"
+      "最重要的输出要求：JSON 顶层必须有 display 字段，值是**不超过 15 个可打印 "
+      "ASCII 字符的英文短语**，指出最关键的异常进程/原因或建议动作（例如 "
+      "CPU 99 PYTHON、DISK FULL、SVC DOWN、RESTART PROXY）。这条会直接显示在"
+      "设备 LCD 上（LCD 只支持 ASCII，中文无效）。\n"
       "硬约束：下面已给出 Skill 原文与服务器证据，二者均已完整提供。"
       "严禁调用任何工具（包括 read_file、velaops_check_resources、run_shell、"
       "curl），严禁读取文件，严禁索要更多证据或密钥。只输出一个 minified JSON "
@@ -685,10 +689,23 @@ static void velaops_monitor_alarm_summary(
       snprintf(buffer, capacity, "MEM %d%% HIGH",
                (int)(resources->memory.used_percent + 0.5));
     }
-  else if (resources->cpu.valid && resources->cpu.used_percent >= 90.0)
+  else if (resources->cpu.valid && resources->cpu.used_percent >= 85.0)
     {
-      snprintf(buffer, capacity, "CPU %d%% HIGH",
-               (int)(resources->cpu.used_percent + 0.5));
+      const char *base = resources->process.valid ?
+                         strrchr(resources->process.name, '/') : NULL;
+
+      base = base != NULL ? base + 1 :
+             (resources->process.valid ? resources->process.name : NULL);
+      if (base != NULL && base[0] != '\0')
+        {
+          snprintf(buffer, capacity, "%.12s %d%%", base,
+                   (int)(resources->process.cpu_percent + 0.5));
+        }
+      else
+        {
+          snprintf(buffer, capacity, "CPU %d%% HIGH",
+                   (int)(resources->cpu.used_percent + 0.5));
+        }
     }
   else
     {

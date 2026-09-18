@@ -8,6 +8,7 @@ from velaops_proxy.diagnostics import (
     LogSnapshot,
     MemorySnapshot,
     PortSnapshot,
+    ProcessSnapshot,
     ReadOnlyDiagnostics,
     ServiceSnapshot,
 )
@@ -34,6 +35,10 @@ class FakeInspector:
     def cpu_usage(self):
         self.last = ("cpu",)
         return CpuSnapshot(12.5, 8, 0.5, 0.4, 0.3)
+
+    def top_process(self):
+        self.last = ("top_process",)
+        return ProcessSnapshot("stress_cpu", 96.5)
 
     def service_log(self, service, lines):
         self.last = ("log", service.unit, service.manager, lines)

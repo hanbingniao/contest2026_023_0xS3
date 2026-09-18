@@ -49,6 +49,7 @@ static void velaops_agent_map_display_text(const char *content, char *output,
   const cJSON *action;
   const cJSON *target;
   const cJSON *status;
+  const cJSON *display;
   char label[24];
 
   if (body == NULL)
@@ -69,39 +70,109 @@ static void velaops_agent_map_display_text(const char *content, char *output,
   target = cJSON_IsObject(recommendation) ?
            cJSON_GetObjectItemCaseSensitive(recommendation, "target") : NULL;
   status = cJSON_GetObjectItemCaseSensitive(root, "status");
+  display = cJSON_GetObjectItemCaseSensitive(root, "display");
 
-  label[0] = '\0';
-  if (cJSON_IsString(action) && action->valuestring != NULL)
-    {
-      if (strcmp(action->valuestring, "restart_service") == 0)
-        {
-          const char *name = (cJSON_IsString(target) &&
-                              target->valuestring != NULL) ?
-                             target->valuestring : "SERVICE";
+  {
+    const char *state = (cJSON_IsString(status) &&
+                         status->valuestring != NULL) ?
+                        status->valuestring : "";
+    int alarm = (strcmp(state, "warning") == 0 ||
+                 strcmp(state, "critical") == 0);
+    int has_action = cJSON_IsString(action) && action->valuestring != NULL &&
+                     strcmp(action->valuestring, "none") != 0;
 
-          snprintf(label, sizeof(label), "RESTART %.11s", name);
-        }
-      else if (strcmp(action->valuestring, "retry_check") == 0)
-        {
-          snprintf(label, sizeof(label), "RETRY CHECK");
-        }
-      else if (strcmp(action->valuestring, "none") != 0)
-        {
-          snprintf(label, sizeof(label), "%.15s", action->valuestring);
-        }
-    }
-  else if (cJSON_IsString(status) && status->valuestring != NULL)
-    {
-      /* 只在确有异常时覆盖告警框，避免模型误判 normal 把本地告警刷掉。 */
-      if (strcmp(status->valuestring, "critical") == 0)
-        {
-          snprintf(label, sizeof(label), "CRITICAL");
-        }
-      else if (strcmp(status->valuestring, "warning") == 0)
-        {
-          snprintf(label, sizeof(label), "WARNING");
-        }
-    }
+    label[0] = '\0';
+
+    /* 优先使用 LLM 自己给的短结论（display）：只在确有异常/建议动作时采用，
+     * 避免模型误判 normal 时把本地告警刷掉。只保留可打印 ASCII。 */
+    if ((alarm || has_action) && cJSON_IsString(display) &&
+        display->valuestring != NULL)
+      {
+        const unsigned char *cursor =
+            (const unsigned char *)display->valuestring;
+        size_t out = 0;
+
+        while (*cursor != '\0' && out < sizeof(label) - 1)
+          {
+            if (*cursor >= 0x20 && *cursor <= 0x7e)
+              {
+                label[out++] = (char)*cursor;
+              }
+            cursor++;
+          }
+        label[out] = '\0';
+      }
+
+    if (label[0] == '\0' && has_action)
+      {
+        if (strcmp(action->valuestring, "restart_service") == 0)
+          {
+            const char *name = (cJSON_IsString(target) &&
+                                target->valuestring != NULL) ?
+                               target->valuestring : "SERVICE";
+
+            snprintf(label, sizeof(label), "RESTART %.11s", name);
+          }
+        else if (strcmp(action->valuestring, "retry_check") == 0)
+          {
+            snprintf(label, sizeof(label), "RETRY CHECK");
+          }
+        else
+          {
+            snprintf(label, sizeof(label), "%.15s", action->valuestring);
+          }
+      }
+
+    /* 无动作建议时，按 evidence 给出更直观的短语；只在确有异常时覆盖，
+     * 避免模型误判 normal 把本地告警刷掉。 */
+    if (label[0] == '\0' && alarm)
+      {
+        const cJSON *evidence = cJSON_GetObjectItemCaseSensitive(root,
+                                                                 "evidence");
+        const cJSON *item;
+
+        cJSON_ArrayForEach(item, evidence)
+          {
+            const cJSON *metric = cJSON_GetObjectItemCaseSensitive(item,
+                                                                   "metric");
+
+            if (!cJSON_IsString(metric) || metric->valuestring == NULL)
+              {
+                continue;
+              }
+            if (strstr(metric->valuestring, "cpu") != NULL)
+              {
+                snprintf(label, sizeof(label), "CPU HIGH");
+                break;
+              }
+            if (strstr(metric->valuestring, "disk") != NULL)
+              {
+                snprintf(label, sizeof(label), "DISK HIGH");
+                break;
+              }
+            if (strstr(metric->valuestring, "memory") != NULL)
+              {
+                snprintf(label, sizeof(label), "MEM HIGH");
+                break;
+              }
+            if (strstr(metric->valuestring, "service") != NULL)
+              {
+                snprintf(label, sizeof(label), "SERVICE DOWN");
+                break;
+              }
+            if (strstr(metric->valuestring, "port") != NULL)
+              {
+                snprintf(label, sizeof(label), "PORT CLOSED");
+                break;
+              }
+          }
+      }
+    if (label[0] == '\0' && alarm)
+      {
+        snprintf(label, sizeof(label), "%s",
+                 strcmp(state, "critical") == 0 ? "CRITICAL" : "WARNING");
+      }
+  }
 
   cJSON_Delete(root);
   if (label[0] == '\0')

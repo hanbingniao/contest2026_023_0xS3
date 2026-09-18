@@ -207,10 +207,12 @@ static int velaops_agent_execute_tool(const char *name,
   status = velaops_agent_wrap_evidence(result_json, output, output_capacity);
   if (status == OK)
     {
-      /* 监控启动失败不改变本次只读取证结果；后续工具调用会再次尝试。
-       * 屏显看板与事件监控同样在首次成功取证后拉起，两者都幂等。 */
-      (void)g_monitor_starter(g_resource_fetcher, result_json);
-      (void)velaops_screen_start(g_resource_fetcher);
+      /* 屏显与主动巡检由主看板任务统一负责（唯一 LCD/巡检所有者）。Agent 侧
+       * 不再另起后台采样/屏显线程：否则会与主看板并发解析同一份资源 JSON 和
+       * 同时写 LCD，既造成堆损坏崩溃也互相覆盖。Agent 仍负责 Skill 与工具调用。
+       * 保留注册的 starter/fetcher 供接口兼容，这里不主动拉起。 */
+      (void)g_monitor_starter;
+      (void)velaops_screen_start;
     }
   return status;
 }

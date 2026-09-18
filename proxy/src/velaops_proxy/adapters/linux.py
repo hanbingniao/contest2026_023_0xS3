@@ -14,6 +14,7 @@ from ..diagnostics import (
     LogSnapshot,
     MemorySnapshot,
     PortSnapshot,
+    ProcessSnapshot,
     ServiceSnapshot,
 )
 from ..config import ServiceConfig
@@ -105,6 +106,26 @@ class LinuxSystemInspector:
             load5=load5,
             load15=load15,
         )
+
+    def top_process(self) -> ProcessSnapshot:
+        ps_path = shutil.which("ps") or "/bin/ps"
+        # 用完整命令行（args）便于 LLM 指出"是谁在吃 CPU"（如 stress_cpu.py）。
+        result = self._run(
+            (ps_path, "-eo", "args=,pcpu=", "--sort=-pcpu"), max_bytes=16 * 1024
+        )
+        name = "unknown"
+        percent = 0.0
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            try:
+                percent = round(float(fields[-1]), 1)
+            except ValueError:
+                continue
+            name = " ".join(fields[:-1])[:31]
+            break
+        return ProcessSnapshot(name=name, cpu_percent=percent)
 
     def service_log(self, service: ServiceConfig, lines: int) -> LogSnapshot:
         unit_option = "--user-unit" if service.manager == "user" else "--unit"

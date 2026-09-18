@@ -5,6 +5,7 @@
 #include "velaops_resource_result.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "cJSON.h"
@@ -118,6 +119,25 @@ int velaops_resource_result_parse(const char *result_json,
         parsed_cpu.cores = (int)cores;
         parsed_cpu.valid = true;
         parsed.cpu = parsed_cpu;
+      }
+  }
+
+  /* 顶层进程（可选）：让 LLM 指出"是谁在吃 CPU"。缺失/非法不影响解析。 */
+  {
+    const cJSON *process = velaops_object(root, "top_process");
+    const cJSON *name = process != NULL ?
+                        cJSON_GetObjectItemCaseSensitive(process, "name") :
+                        NULL;
+    double percent;
+
+    if (cJSON_IsString(name) && name->valuestring != NULL &&
+        velaops_number(process, "cpu_percent", &percent) &&
+        percent >= 0.0 && percent <= 100.0 * 1024.0)
+      {
+        snprintf(parsed.process.name, sizeof(parsed.process.name), "%s",
+                 name->valuestring);
+        parsed.process.cpu_percent = percent;
+        parsed.process.valid = true;
       }
   }
 

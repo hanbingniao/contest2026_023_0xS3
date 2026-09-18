@@ -14,6 +14,8 @@
 /* 演示服务器磁盘基线就在 85% 附近长期驻留，85% 阈值会让主动事件永久触发；
  * 事件判定用 90%，屏显配色仍保留 85% 的视觉提醒。 */
 #define VELAOPS_DISK_WARNING_PERCENT 90.0
+/* CPU 使用率告警阈值：压测/满载时触发主动事件与 LLM 诊断。 */
+#define VELAOPS_CPU_WARNING_PERCENT 85.0
 
 static velaops_diagnosis_status_t velaops_evaluate_observation(
     const velaops_resource_observation_t *observation)
@@ -23,7 +25,9 @@ static velaops_diagnosis_status_t velaops_evaluate_observation(
       return VELAOPS_DIAGNOSIS_CRITICAL;
     }
   if (observation->memory.used_percent >= VELAOPS_MEMORY_WARNING_PERCENT ||
-      observation->disk_percent >= VELAOPS_DISK_WARNING_PERCENT)
+      observation->disk_percent >= VELAOPS_DISK_WARNING_PERCENT ||
+      (observation->cpu.valid &&
+       observation->cpu.used_percent >= VELAOPS_CPU_WARNING_PERCENT))
     {
       return VELAOPS_DIAGNOSIS_WARNING;
     }
@@ -131,6 +135,7 @@ static int velaops_local_diagnosis_encode(
   const char *risk = "read_only";
   char memory_value[24];
   char disk_value[24];
+  char cpu_value[24];
   velaops_diagnosis_status_t diagnosis_status = VELAOPS_DIAGNOSIS_UNKNOWN;
   int result = -1;
 
@@ -191,13 +196,19 @@ static int velaops_local_diagnosis_encode(
                observation->memory.used_percent);
       snprintf(disk_value, sizeof(disk_value), "%.2f",
                observation->disk_percent);
+      snprintf(cpu_value, sizeof(cpu_value), "%.2f",
+               observation->cpu.used_percent);
       if ((observation->memory.used_percent >=
                VELAOPS_MEMORY_WARNING_PERCENT &&
            velaops_add_evidence(evidence, "result.memory.used_percent",
                                 memory_value, "达到80%告警阈值") != 0) ||
-          (observation->disk_percent >= VELAOPS_DISK_WARNING_PERCENT &&
-           velaops_add_evidence(evidence, "result.disk.used_percent",
-                                disk_value, "达到90%告警阈值") != 0))
+           (observation->disk_percent >= VELAOPS_DISK_WARNING_PERCENT &&
+            velaops_add_evidence(evidence, "result.disk.used_percent",
+                                 disk_value, "达到90%告警阈值") != 0) ||
+           (observation->cpu.valid &&
+            observation->cpu.used_percent >= VELAOPS_CPU_WARNING_PERCENT &&
+            velaops_add_evidence(evidence, "result.cpu.used_percent",
+                                 cpu_value, "达到85%告警阈值") != 0))
         {
           goto cleanup;
         }
