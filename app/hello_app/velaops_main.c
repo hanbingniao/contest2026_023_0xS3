@@ -17,6 +17,7 @@
 
 #include <netutils/ntpclient.h>
 #include <nuttx/input/buttons.h>
+#include <nuttx/leds/userled.h>
 #include <fsutils/mkfatfs.h>
 #include "velaops_agent_monitor.h"
 #include "velaops_agent_tools.h"
@@ -48,6 +49,7 @@
 #define VELAOPS_TIME_SYNC_ATTEMPT_SECONDS 20
 #define VELAOPS_MEMORY_UNHEALTHY_PERCENT 80.0
 #define VELAOPS_BUTTON_DEVICE "/dev/buttons"
+#define VELAOPS_LED_DEVICE "/dev/userleds"
 #define VELAOPS_MONITOR_INTERVAL_SECONDS 5
 /* WiFi 模式下，复位后 ai_agent 建链与看板首个请求同时发起会让 ESP32-S3
  * 掉线，先等 Agent 稳定再巡检；串口模式无此竞态，立即开始。 */
@@ -748,6 +750,20 @@ static unsigned int velaops_monitor_startup_delay(void)
   return delay;
 }
 
+/* 板载 LED（ESP32-S3-EYE 经 /dev/userleds 暴露 1 个灯）：随告警框闪烁。 */
+static void velaops_monitor_led(int fd, int on)
+{
+  struct userled_s led;
+
+  if (fd < 0)
+    {
+      return;
+    }
+  led.ul_led = 0;
+  led.ul_on = on != 0;
+  (void)ioctl(fd, ULEDIOC_SETLED, (unsigned long)(uintptr_t)&led);
+}
+
 static void *velaops_button_worker(void *argument)
 {
   struct velaops_button_context_s *context = argument;
@@ -1081,6 +1097,7 @@ int main(int argc, char *argv[])
       int force_render = 1;
       int blink_phase = 0;
       int blink_tick = 0;
+      int led_fd;
       char alarm_text[25] = {0};
 
       if (velaops_resource_incident_init(
@@ -1098,6 +1115,15 @@ int main(int argc, char *argv[])
           fprintf(stderr, "velaops: 无法打开 /dev/lcd0\n");
           return EXIT_FAILURE;
         }
+
+      /* 板载 LED 与告警框同步闪烁；缺失不影响看板。 */
+      led_fd = open(VELAOPS_LED_DEVICE, O_WRONLY);
+      if (led_fd < 0)
+        {
+          printf("velaops: 无法打开 %s（告警不闪灯）\n", VELAOPS_LED_DEVICE);
+        }
+      velaops_monitor_led(led_fd, 0);
+
       button_fd = open(VELAOPS_BUTTON_DEVICE, O_RDONLY | O_NONBLOCK);
       if (button_fd < 0 || ioctl(button_fd, BTNIOC_SUPPORTED,
                                  (unsigned long)(uintptr_t)&supported) < 0)
@@ -1302,10 +1328,13 @@ int main(int argc, char *argv[])
                 {
                   velaops_display_show_message(display, "ALERT", text,
                                                blink_phase);
+                  /* 板载 LED 随告警框同节奏闪烁。 */
+                  velaops_monitor_led(led_fd, blink_phase);
                 }
               else
                 {
                   velaops_display_show(display, &snapshot, page_snapshot);
+                  velaops_monitor_led(led_fd, 0);
                 }
               force_render = 0;
             }
