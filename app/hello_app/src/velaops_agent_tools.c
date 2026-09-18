@@ -235,8 +235,15 @@ int velaops_agent_tools_register(
     extern void agent_set_reply_hook(void (*hook)(const char *, const char *));
     extern void velaops_notify_agent_reply(const char *channel,
                                            const char *content);
+    extern void llm_set_io_lock_hook(void (*lock_fn)(void),
+                                     void (*unlock_fn)(void));
+    extern void velaops_tunnel_lock(void);
+    extern void velaops_tunnel_unlock(void);
 
     agent_set_reply_hook(velaops_notify_agent_reply);
+
+    /* 让 LLM 的 HTTP 请求与团队隧道请求共用同一把锁（见传输层互斥）。 */
+    llm_set_io_lock_hook(velaops_tunnel_lock, velaops_tunnel_unlock);
   }
 
   if (!g_provider_registered)
