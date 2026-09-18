@@ -50,7 +50,7 @@ _WRITE_LOCK = threading.Lock()
 # 作为流控信号，保证一条命令被板端完整消费后再发下一条。
 _ECHO_EVENT = threading.Event()
 _echo_needle = ""
-_ECHO_WAIT = float(os.environ.get("RELAY_ECHO_WAIT", "3.0"))
+_ECHO_WAIT = float(os.environ.get("RELAY_ECHO_WAIT", "8.0"))
 
 
 def crc16(data: bytes) -> int:
@@ -161,6 +161,22 @@ def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
             buffer.clear()
 
 
+def _write_all(fd: int, data: bytes, timeout: float = 5.0) -> None:
+    """写满整段数据；串口是非阻塞的，缓冲满时等待可写而不是抛 EAGAIN。"""
+    view = memoryview(data)
+    while view:
+        try:
+            written = os.write(fd, view)
+        except BlockingIOError:
+            _, writable, _ = select.select([], [fd], [], timeout)
+            if not writable:
+                raise TimeoutError("串口写阻塞超时")
+            continue
+        if written <= 0:
+            raise OSError("串口写失败")
+        view = view[written:]
+
+
 def _send_line(fd: int, text: str, char_delay: float,
                expect: str | None = None) -> None:
     """写一行并等板端回显出该行（流控），避免连发时丢字符/粘连。"""
@@ -168,19 +184,24 @@ def _send_line(fd: int, text: str, char_delay: float,
     _echo_needle = expect if expect is not None else text[:24]
     _ECHO_EVENT.clear()
     for ch in text:
-        os.write(fd, ch.encode("ascii"))
+        _write_all(fd, ch.encode("ascii"))
         if char_delay:
             time.sleep(char_delay)
-    os.write(fd, b"\n")
+    _write_all(fd, b"\n")
     _ECHO_EVENT.wait(_ECHO_WAIT)
     _echo_needle = ""
 
 
 def _write_nsh(fd: int, command: str) -> None:
     # 串口写需串行化：主循环（响应回写）与 set-time 后台线程都会下发命令。
+    # 单次写失败（缓冲满/回显超时）只记录，不能让主循环或后台线程崩溃。
     with _WRITE_LOCK:
-        _send_line(fd, command, 0.001)
-        time.sleep(0.05)
+        try:
+            _send_line(fd, command, 0.001)
+            time.sleep(0.05)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[relay] 写串口失败（已忽略）: {exc}\n")
+            sys.stderr.flush()
 
 
 def _push_b64(fd: int, b64: bytes, remote: str) -> None:
@@ -190,15 +211,19 @@ def _push_b64(fd: int, b64: bytes, remote: str) -> None:
     留出处理时间；板端解码器只认 base64 字符，不能加任何前缀。"""
     _write_nsh(fd, f"rm -f {remote}")
     text = b64.decode("ascii")
-    char_delay = float(os.environ.get("PUSH_CHAR_DELAY", "0.003"))
-    line_delay = float(os.environ.get("PUSH_LINE_DELAY", "0.15"))
+    char_delay = float(os.environ.get("PUSH_CHAR_DELAY", "0.001"))
+    line_delay = float(os.environ.get("PUSH_LINE_DELAY", "0.05"))
     with _WRITE_LOCK:
-        for i in range(0, len(text), 48):
-            chunk = text[i:i + 48]
-            command = f"echo '{chunk}' >> {remote}"
-            # 用 base64 片段本身作为回显判据（各段唯一）；等板端回显再发下一段。
-            _send_line(fd, command, char_delay, expect=chunk)
-            time.sleep(line_delay)
+        try:
+            for i in range(0, len(text), 48):
+                chunk = text[i:i + 48]
+                command = f"echo '{chunk}' >> {remote}"
+                # 用 base64 片段本身作为回显判据（各段唯一）；等回显再发下一段。
+                _send_line(fd, command, char_delay, expect=chunk)
+                time.sleep(line_delay)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[relay] 回写响应失败（已忽略）: {exc}\n")
+            sys.stderr.flush()
 
 
 def _read_remote(fd: int, events: "queue.Queue[tuple]", remote: str,

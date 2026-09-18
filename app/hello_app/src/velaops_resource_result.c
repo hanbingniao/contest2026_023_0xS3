@@ -96,6 +96,31 @@ int velaops_resource_result_parse(const char *result_json,
       return -1;
     }
   parsed.port_latency_ms = (int)value;
+
+  /* CPU 为可选扩展：老代理不返回时保持 valid=0（parsed 已整体清零），看板
+   * 据此显示 "--"，不影响既有校验。字段非法时同样只标记无效。 */
+  {
+    const cJSON *cpu = velaops_object(root, "cpu");
+    velaops_cpu_observation_t parsed_cpu = {0};
+    double cores;
+
+    if (cpu != NULL &&
+        velaops_number(cpu, "used_percent", &parsed_cpu.used_percent) &&
+        velaops_number(cpu, "load1", &parsed_cpu.load1) &&
+        velaops_number(cpu, "load5", &parsed_cpu.load5) &&
+        velaops_number(cpu, "load15", &parsed_cpu.load15) &&
+        velaops_number(cpu, "cores", &cores) && cores >= 1 &&
+        floor(cores) == cores && cores <= 1024 &&
+        parsed_cpu.used_percent >= 0.0 && parsed_cpu.used_percent <= 100.0 &&
+        parsed_cpu.load1 >= 0.0 && parsed_cpu.load5 >= 0.0 &&
+        parsed_cpu.load15 >= 0.0)
+      {
+        parsed_cpu.cores = (int)cores;
+        parsed_cpu.valid = true;
+        parsed.cpu = parsed_cpu;
+      }
+  }
+
   cJSON_Delete(root);
   *result = parsed;
   return 0;

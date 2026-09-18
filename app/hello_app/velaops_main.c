@@ -22,6 +22,7 @@
 #include "velaops_agent_tools.h"
 #include "velaops_autoconfig.h"
 #include "velaops_button_approval.h"
+#include "velaops_dashboard.h"
 #include "velaops_device_config.h"
 #include "velaops_display.h"
 #include "velaops_health.h"
@@ -338,6 +339,8 @@ static int velaops_post_request(const char *target, const char *body,
   if (display_state != NULL && evaluate_memory)
     {
       velaops_health_snapshot_t snapshot;
+      velaops_resource_observation_t resources;
+
       if (velaops_memory_result_parse(response.result_json,
                                       &display_state->memory) !=
           VELAOPS_MEMORY_RESULT_OK ||
@@ -351,6 +354,15 @@ static int velaops_post_request(const char *target, const char *body,
         }
       display_state->health = snapshot.result;
       display_state->observed_at = snapshot.observed_at;
+
+      /* 看板要显示内存/磁盘/服务/端口全套卡片；check_resources 的 result
+       * 已包含这些字段，这里一并解析，避免看板只剩状态灯而数据全为 "--"。 */
+      if (velaops_resource_result_parse(response.result_json, &resources) == 0)
+        {
+          display_state->resources = resources;
+          display_state->memory = resources.memory;
+          display_state->has_resources = 1;
+        }
     }
   if (display_state != NULL && !evaluate_memory)
     {
@@ -1056,14 +1068,16 @@ int main(int argc, char *argv[])
                * base64 帧交错，且刷屏影响联调。仅在事件/失败时打印。 */
               request_status = velaops_post_request(
                   VELAOPS_ACTION_TARGET, VELAOPS_CHECK_RESOURCES_BODY,
-                  NULL, true, false, &refreshed,
+                  NULL, false, false, &refreshed,
                   resources, sizeof(resources));
               if (request_status == EXIT_SUCCESS)
                 {
                   consecutive_failures = 0;
-                  incident_status = velaops_resource_incident_apply(
-                      &resource_incident, resources, refreshed.observed_at,
-                      &incident_event, diagnosis, sizeof(diagnosis));
+                  incident_status =
+                      velaops_resource_incident_apply_observation(
+                          &resource_incident, &refreshed.resources,
+                          refreshed.observed_at, &incident_event, diagnosis,
+                          sizeof(diagnosis));
                   if (incident_status == VELAOPS_RESOURCE_INCIDENT_OK &&
                       incident_event != VELAOPS_INCIDENT_EVENT_NONE)
                     {
@@ -1104,6 +1118,11 @@ int main(int argc, char *argv[])
                 {
                   velaops_monitor_repair_network(false);
                   consecutive_failures = 0;
+                }
+              /* 只在成功巡检时追加 CPU 历史，失败轮保持曲线连续。 */
+              if (request_status == EXIT_SUCCESS)
+                {
+                  velaops_dashboard_push_cpu(&refreshed);
                 }
               pthread_mutex_lock(&display_lock);
               state = refreshed;

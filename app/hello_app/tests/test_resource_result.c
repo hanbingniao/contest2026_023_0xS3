@@ -19,7 +19,9 @@ static const char valid_result[] =
     "\"active_state\":\"active\",\"sub_state\":\"running\","
     "\"result\":\"success\",\"main_exit_status\":0},"
     "\"port\":{\"alias\":\"proxy-http\",\"reachable\":true,"
-    "\"latency_ms\":3}}";
+    "\"latency_ms\":3},"
+    "\"cpu\":{\"used_percent\":12.5,\"cores\":8,\"load1\":0.5,"
+    "\"load5\":0.4,\"load15\":0.3}}";
 
 static void fail(const char *expression, int line)
 {
@@ -40,6 +42,26 @@ static void test_parses_dashboard_fields(void)
   EXPECTED(result.service_active);
   EXPECTED(result.port_reachable);
   EXPECTED(result.port_latency_ms == 3);
+  EXPECTED(result.cpu.valid);
+  EXPECTED(result.cpu.used_percent == 12.5);
+  EXPECTED(result.cpu.cores == 8);
+  EXPECTED(result.cpu.load1 == 0.5);
+  EXPECTED(result.cpu.load5 == 0.4);
+  EXPECTED(result.cpu.load15 == 0.3);
+}
+
+static void test_cpu_is_optional(void)
+{
+  velaops_resource_observation_t result;
+
+  EXPECTED(velaops_resource_result_parse(
+               "{\"memory\":{\"total_bytes\":1000,\"available_bytes\":600,"
+               "\"used_bytes\":400,\"used_percent\":40.0},"
+               "\"disk\":{\"used_percent\":25.0},"
+               "\"service\":{\"active_state\":\"active\"},"
+               "\"port\":{\"reachable\":true,\"latency_ms\":3}}",
+               &result) == 0);
+  EXPECTED(!result.cpu.valid);
 }
 
 static void test_invalid_result_does_not_replace_last_snapshot(void)
@@ -75,6 +97,7 @@ static void test_rejects_impossible_values(void)
 int main(void)
 {
   test_parses_dashboard_fields();
+  test_cpu_is_optional();
   test_invalid_result_does_not_replace_last_snapshot();
   test_rejects_impossible_values();
   puts("PASS: VelaOps resource result adapter tests");

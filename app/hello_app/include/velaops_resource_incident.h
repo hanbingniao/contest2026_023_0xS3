@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "velaops_incident.h"
+#include "velaops_resource_result.h"
 
 typedef enum
 {
@@ -32,6 +33,13 @@ velaops_resource_incident_status_t velaops_resource_incident_init(
 
 velaops_resource_incident_status_t velaops_resource_incident_apply(
     velaops_resource_incident_t *incident, const char *resource_json,
+    int64_t observed_at, velaops_incident_event_t *event,
+    char *diagnosis, size_t diagnosis_capacity);
+
+/* 传入已解析资源，避免重复解析 JSON（单次巡检只解析一次）。 */
+velaops_resource_incident_status_t velaops_resource_incident_apply_observation(
+    velaops_resource_incident_t *incident,
+    const velaops_resource_observation_t *observation,
     int64_t observed_at, velaops_incident_event_t *event,
     char *diagnosis, size_t diagnosis_capacity);
 

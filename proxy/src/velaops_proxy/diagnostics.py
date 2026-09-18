@@ -42,6 +42,17 @@ class MemorySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class CpuSnapshot:
+    """一次采样的 CPU 概要：整体使用率、核数与 1/5/15 分钟平均负载。"""
+
+    used_percent: float
+    cores: int
+    load1: float
+    load5: float
+    load15: float
+
+
+@dataclass(frozen=True, slots=True)
 class LogSnapshot:
     text: str
     truncated: bool
@@ -67,6 +78,8 @@ class SystemInspector(Protocol):
     def disk_usage(self, path: str) -> DiskSnapshot: ...
 
     def memory_usage(self) -> MemorySnapshot: ...
+
+    def cpu_usage(self) -> CpuSnapshot: ...
 
     def service_log(self, service: ServiceConfig, lines: int) -> LogSnapshot: ...
 
@@ -137,6 +150,7 @@ class ReadOnlyDiagnostics:
         endpoint = target.ports[port]
         port_snapshot = self._inspector.check_port(endpoint.host, endpoint.port)
         return ActionResult.of(
+            cpu=asdict(self._inspector.cpu_usage()),
             memory=asdict(self._inspector.memory_usage()),
             disk={"alias": disk, **asdict(disk_snapshot)},
             service={"alias": service, **asdict(service_snapshot)},

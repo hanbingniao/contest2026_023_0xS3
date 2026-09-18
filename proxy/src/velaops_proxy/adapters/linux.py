@@ -9,6 +9,7 @@ import socket
 import time
 
 from ..diagnostics import (
+    CpuSnapshot,
     DiskSnapshot,
     LogSnapshot,
     MemorySnapshot,
@@ -27,6 +28,8 @@ class LinuxSystemInspector:
 
     def __init__(self, executor: BoundedCommandExecutor | None = None) -> None:
         self._executor = executor or BoundedCommandExecutor()
+        # /proc/stat 是累计计数，需保存上次采样算区间使用率；进程内单例。
+        self._cpu_previous: tuple[int, int] | None = None
 
     def service_status(self, service: ServiceConfig) -> ServiceSnapshot:
         result = self._run(
@@ -76,6 +79,32 @@ class LinuxSystemInspector:
         used = total - available
         percent = 0.0 if total == 0 else round(used * 100 / total, 2)
         return MemorySnapshot(total, available, used, percent)
+
+    def cpu_usage(self) -> CpuSnapshot:
+        cores = os.cpu_count() or 1
+        total, idle = self._cpu_stat(Path("/proc/stat").read_text(encoding="ascii"))
+        previous = self._cpu_previous
+        self._cpu_previous = (total, idle)
+
+        load1, load5, load15 = self._load_average()
+        if previous is None or total <= previous[0]:
+            # 首次采样没有区间可算，用平均负载估算，避免看板显示 0 误导。
+            used_percent = min(100.0, round(load1 * 100 / cores, 2))
+        else:
+            delta_total = total - previous[0]
+            delta_idle = idle - previous[1]
+            used_percent = (
+                0.0
+                if delta_total <= 0
+                else round((delta_total - delta_idle) * 100 / delta_total, 2)
+            )
+        return CpuSnapshot(
+            used_percent=max(0.0, used_percent),
+            cores=cores,
+            load1=load1,
+            load5=load5,
+            load15=load15,
+        )
 
     def service_log(self, service: ServiceConfig, lines: int) -> LogSnapshot:
         unit_option = "--user-unit" if service.manager == "user" else "--unit"
@@ -150,6 +179,27 @@ class LinuxSystemInspector:
                 key, value = line.split("=", 1)
                 result[key] = value
         return result
+
+    @staticmethod
+    def _load_average() -> tuple[float, float, float]:
+        try:
+            load1, load5, load15 = os.getloadavg()
+        except (OSError, AttributeError):
+            return 0.0, 0.0, 0.0
+        return round(load1, 2), round(load5, 2), round(load15, 2)
+
+    @staticmethod
+    def _cpu_stat(text: str) -> tuple[int, int]:
+        for line in text.splitlines():
+            if not line.startswith("cpu "):
+                continue
+            parts = line.split()[1:]
+            if len(parts) < 4 or not all(part.isdecimal() for part in parts):
+                raise RuntimeError("/proc/stat CPU 字段不合法")
+            values = [int(part) for part in parts]
+            idle = values[3] + (values[4] if len(values) > 4 else 0)
+            return sum(values), idle
+        raise RuntimeError("/proc/stat 缺少 CPU 汇总行")
 
     @staticmethod
     def _meminfo(text: str) -> dict[str, int]:

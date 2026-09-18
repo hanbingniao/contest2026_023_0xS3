@@ -48,6 +48,22 @@ class LinuxInspectorTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             LinuxSystemInspector._meminfo("MemTotal: invalid kB\n")
 
+    def test_cpu_stat_parser_sums_total_and_idle(self):
+        total, idle = LinuxSystemInspector._cpu_stat(
+            "cpu  10 20 30 400 50 0 0 0 0 0\ncpu0 1 2 3 4 5 0 0 0 0 0\n"
+        )
+        self.assertEqual(total, 10 + 20 + 30 + 400 + 50)
+        self.assertEqual(idle, 400 + 50)
+        with self.assertRaises(RuntimeError):
+            LinuxSystemInspector._cpu_stat("cpu0 1 2 3 4\n")
+
+    def test_cpu_usage_smoke(self):
+        snapshot = LinuxSystemInspector().cpu_usage()
+        self.assertGreaterEqual(snapshot.cores, 1)
+        self.assertGreaterEqual(snapshot.used_percent, 0.0)
+        self.assertLessEqual(snapshot.used_percent, 100.0)
+        self.assertGreaterEqual(snapshot.load1, 0.0)
+
     def test_command_failure_is_not_reported_as_valid_snapshot(self):
         executor = FakeExecutor(
             CommandResult(1, "", "denied", False, False, False, 1)

@@ -10,11 +10,22 @@
 
 typedef struct
 {
+  double used_percent;
+  double load1;
+  double load5;
+  double load15;
+  int cores;
+  bool valid;
+} velaops_cpu_observation_t;
+
+typedef struct
+{
   velaops_memory_observation_t memory;
   double disk_percent;
   bool service_active;
   bool port_reachable;
   int port_latency_ms;
+  velaops_cpu_observation_t cpu;
 } velaops_resource_observation_t;
 
 int velaops_resource_result_parse(const char *result_json,

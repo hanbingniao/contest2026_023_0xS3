@@ -3,6 +3,7 @@ import unittest
 from velaops_proxy.actions import ActionError, ActionRegistry, ActionRequest
 from velaops_proxy.config import PortConfig, ServiceConfig, TargetConfig
 from velaops_proxy.diagnostics import (
+    CpuSnapshot,
     DiskSnapshot,
     LogSnapshot,
     MemorySnapshot,
@@ -29,6 +30,10 @@ class FakeInspector:
     def memory_usage(self):
         self.last = ("memory",)
         return MemorySnapshot(100, 30, 70, 70.0)
+
+    def cpu_usage(self):
+        self.last = ("cpu",)
+        return CpuSnapshot(12.5, 8, 0.5, 0.4, 0.3)
 
     def service_log(self, service, lines):
         self.last = ("log", service.unit, service.manager, lines)
@@ -76,6 +81,24 @@ class DiagnosticsTest(unittest.TestCase):
                 result = self.registry.execute(request(action, parameters))
                 self.assertEqual(self.inspector.last, expected_call)
                 self.assertTrue(result.data)
+
+    def test_check_resources_includes_cpu_snapshot(self):
+        target = TargetConfig(
+            allowed_actions=frozenset({"check_resources"}),
+            services=self.target.services,
+            ports=self.target.ports,
+            disks=self.target.disks,
+        )
+        diagnostics = ReadOnlyDiagnostics({"local-dev": target}, self.inspector)
+        registry = ActionRegistry()
+        diagnostics.register(registry)
+        result = registry.execute(request("check_resources", {}))
+        cpu = result.data["cpu"]
+        self.assertEqual(cpu["used_percent"], 12.5)
+        self.assertEqual(cpu["cores"], 8)
+        self.assertEqual(cpu["load1"], 0.5)
+        self.assertEqual(cpu["load5"], 0.4)
+        self.assertEqual(cpu["load15"], 0.3)
 
     def test_rejects_unknown_target_resource_and_parameters(self):
         invalid = (

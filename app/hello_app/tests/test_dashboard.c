@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 static uint32_t pixel_hash(const uint16_t *pixels, size_t count)
 {
@@ -84,6 +85,21 @@ int main(void)
   state.resources.service_active = true;
   state.resources.port_reachable = true;
   state.resources.port_latency_ms = 18;
+  state.resources.cpu.valid = 1;
+  state.resources.cpu.used_percent = 23.4;
+  state.resources.cpu.cores = 8;
+  state.resources.cpu.load1 = 0.82;
+  state.resources.cpu.load5 = 0.64;
+  state.resources.cpu.load15 = 0.51;
+  state.observed_at = (int64_t)time(NULL) - 5;
+
+  for (unsigned int sample = 0;
+       sample < VELAOPS_DISPLAY_CPU_HISTORY; sample++)
+    {
+      state.cpu_history[sample] =
+          (float)(30.0 + 25.0 * ((sample * 7) % 11) / 10.0);
+    }
+  state.cpu_history_len = VELAOPS_DISPLAY_CPU_HISTORY;
 
   for (page = 0; page < VELAOPS_DISPLAY_PAGE_COUNT; page++)
     {
