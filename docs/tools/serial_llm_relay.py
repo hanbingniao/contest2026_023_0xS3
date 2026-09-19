@@ -356,6 +356,21 @@ def main() -> int:
             _write_nsh(fd, "echo x > /tmp/velaops-diagnose")
             sys.stderr.write("[relay] 已触发板端单轮 LLM 诊断\n")
             sys.stderr.flush()
+        # 联调：开机稳定后注入一条 NSH 命令（例如触发 repair-demo 看批准弹窗）。
+        # 命令可来自 RELAY_INJECT_CMD 或 RELAY_INJECT_FILE（含空格时用文件更稳）。
+        inject = os.environ.get("RELAY_INJECT_CMD")
+        inject_file = os.environ.get("RELAY_INJECT_FILE")
+        if not inject and inject_file:
+            try:
+                with open(inject_file, "r", encoding="utf-8") as handle:
+                    inject = handle.readline().strip()
+            except OSError:
+                inject = None
+        if inject:
+            time.sleep(float(os.environ.get("RELAY_INJECT_DELAY", "25")))
+            _write_nsh(fd, inject)
+            sys.stderr.write(f"[relay] 已注入命令: {inject}\n")
+            sys.stderr.flush()
 
     threading.Thread(target=_bootstrap, daemon=True).start()
     threading.Thread(target=_forward_worker, args=(fd,), daemon=True).start()
