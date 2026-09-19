@@ -462,6 +462,8 @@ static int velaops_fetch_resources_for_agent(char *output,
   return status;
 }
 
+static void velaops_popup_write(const char *title, const char *text);
+
 static int velaops_repair_demo_service(char *output, size_t output_capacity)
 {
   velaops_button_approval_result_t approval_result;
@@ -485,10 +487,13 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
     }
 
   printf("velaops: 请在 30 秒内连续长按 BOOT 2 秒批准重启 demo 服务\n");
+  /* 设备侧明确提示实体批准，避免操作者不知按哪个键/何时按。 */
+  velaops_popup_write("APPROVAL", "PRESS BOOT 2S");
   approval_result = velaops_button_wait_for_long_press(
       VELAOPS_APPROVAL_HOLD_MS, VELAOPS_APPROVAL_TIMEOUT_MS);
   if (approval_result == VELAOPS_BUTTON_TIMEOUT)
     {
+      velaops_popup_write("APPROVAL", "TIMEOUT");
       return velaops_guarded_repair_format_result(
           "not_started", false, "approval_timeout", 0,
           output, output_capacity);
@@ -497,11 +502,13 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
       getrandom(approval_random, sizeof(approval_random), GRND_RANDOM) !=
       sizeof(approval_random))
     {
+      velaops_popup_write("APPROVAL", "REJECTED");
       return velaops_guarded_repair_format_result(
           "not_started", false, "approval_unavailable", 0,
           output, output_capacity);
     }
 
+  velaops_popup_write("REPAIR", "IN PROGRESS");
   approved_at = time(NULL);
   velaops_hex_encode(approval_random, sizeof(approval_random), approval_id);
   if (velaops_guarded_repair_build_request(
@@ -513,6 +520,7 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
                            NULL, 0) != EXIT_SUCCESS)
     {
       /* 传输中断时无法证明服务端是否执行，必须报告 unknown 而不是盲目重试。 */
+      velaops_popup_write("REPAIR", "EXEC FAILED");
       return velaops_guarded_repair_format_result(
           "unknown", false, "execution_failed", 0,
           output, output_capacity);
@@ -529,11 +537,13 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
           velaops_guarded_repair_verify(resources, &recovered) == 0 &&
           recovered)
         {
+          velaops_popup_write("REPAIR", "OK RECOVERED");
           return velaops_guarded_repair_format_result(
               "completed", true, "recovered", attempt,
               output, output_capacity);
         }
     }
+  velaops_popup_write("REPAIR", "VERIFY FAILED");
   return velaops_guarded_repair_format_result(
       "completed", false, "verification_failed",
       VELAOPS_REPAIR_VERIFY_ATTEMPTS, output, output_capacity);
@@ -652,21 +662,56 @@ struct velaops_button_context_s
 
 /* 异常告警框：优先显示 Agent/LLM 推送到事件文件的内容，否则用本地规则摘要。
  * 文本必须是可打印 ASCII（屏显 5x7 字库限制），最长约 24 字符，分两行。 */
-static bool velaops_monitor_consume_popup(char *buffer, size_t capacity)
+/* 写弹窗请求文件。格式：首行为标题（可选），其余为正文（<=24 字符）。
+ * 看板轮询该文件并显示为闪烁框；供 Agent 工具与批准/修复流程共用。 */
+static void velaops_popup_write(const char *title, const char *text)
 {
+  FILE *file = fopen("/tmp/velaops-popup.txt", "w");
+
+  if (file != NULL)
+    {
+      fprintf(file, "%s\n%s", title != NULL ? title : "ALERT",
+              text != NULL ? text : "");
+      fclose(file);
+    }
+}
+
+static bool velaops_monitor_consume_popup(char *title, size_t title_capacity,
+                                          char *buffer, size_t capacity)
+{
+  char raw[96];
   FILE *file;
   size_t length;
+  char *newline;
 
   file = fopen("/tmp/velaops-popup.txt", "r");
   if (file == NULL)
     {
       return false;
     }
-  length = fread(buffer, 1, capacity - 1, file);
+  length = fread(raw, 1, sizeof(raw) - 1, file);
   fclose(file);
-  buffer[length] = '\0';
+  raw[length] = '\0';
   unlink("/tmp/velaops-popup.txt");
-  return length > 0;
+  if (length == 0)
+    {
+      return false;
+    }
+
+  /* 兼容两种写法：仅有正文（默认标题 ALERT），或 “标题\n正文”。 */
+  newline = strchr(raw, '\n');
+  if (newline != NULL)
+    {
+      *newline = '\0';
+      snprintf(title, title_capacity, "%s", raw);
+      snprintf(buffer, capacity, "%s", newline + 1);
+    }
+  else
+    {
+      snprintf(title, title_capacity, "ALERT");
+      snprintf(buffer, capacity, "%s", raw);
+    }
+  return buffer[0] != '\0';
 }
 
 static void velaops_monitor_alarm_summary(
@@ -1106,6 +1151,7 @@ int main(int argc, char *argv[])
       int was_link = 1;
       time_t next_redraw = 0;
       char alarm_text[25] = {0};
+      char alarm_title[20] = "ALERT";
 
       if (velaops_resource_incident_init(
               &resource_incident, VELAOPS_INCIDENT_FAILURE_THRESHOLD,
@@ -1322,15 +1368,20 @@ int main(int argc, char *argv[])
                 }
             }
 
-          /* Agent/LLM 推送到事件文件的短消息：替换告警文本并保持弹窗。 */
+          /* Agent/LLM 或批准/修复流程推送到事件文件的消息：显示为闪烁框。 */
           {
             char pushed[25];
+            char pushed_title[20];
 
-            if (velaops_monitor_consume_popup(pushed, sizeof(pushed)))
+            if (velaops_monitor_consume_popup(pushed_title,
+                                              sizeof(pushed_title), pushed,
+                                              sizeof(pushed)))
               {
                 pthread_mutex_lock(&display_lock);
                 memcpy(alarm_text, pushed, sizeof(alarm_text));
                 alarm_text[sizeof(alarm_text) - 1] = '\0';
+                memcpy(alarm_title, pushed_title, sizeof(alarm_title));
+                alarm_title[sizeof(alarm_title) - 1] = '\0';
                 alarm_active = 1;
                 pthread_mutex_unlock(&display_lock);
                 force_render = 1;
@@ -1360,13 +1411,15 @@ int main(int argc, char *argv[])
               int active = alarm_active;
               int linked = link_state;
               char text[25];
+              char title[20];
 
               memcpy(text, alarm_text, sizeof(text));
+              memcpy(title, alarm_title, sizeof(title));
               pthread_mutex_unlock(&display_lock);
 
               if (active)
                 {
-                  velaops_display_show_message(display, "ALERT", text,
+                  velaops_display_show_message(display, title, text,
                                                blink_phase);
                   velaops_monitor_led(led_fd, blink_phase);
                 }
