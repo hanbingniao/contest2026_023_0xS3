@@ -149,6 +149,34 @@ BOOT 短按依次切换三页：系统总览（健康、内存负载、磁盘和
 normal 后输出 `type=recovered`。这是看板自身的状态提示，不会直接注入 Agent；
 Agent 主动巡检由下一节独立的生命周期适配器负责。
 
+### 3.1 开机自启与连接状态页（串口/无线）
+
+烧录后上电即自动运行（板级 bringup 会拉起 `velaops autoconfig`），无需手动敲
+命令。上电后 LCD 依次显示：
+
+1. `VELAOPS / BOOTING` 开机画面（约 4s）；
+2. `CONNECTION / SERIAL WAIT RELAY`（无线模式为 `WIFI WAIT RELAY`）——等待与
+   开发机建立连接，闪烁框 + 板载 LED 同步闪烁；此时开发机需已运行 relay（串口
+   模式）或可达的转发器（无线模式）；
+3. 首个巡检成功后自动切到资源看板；连接中断显示 `... LINK DOWN`，恢复后自动回
+   看板。
+
+传输模式由设备配置自动判定（host 为 `127.0.0.1` 即 SERIAL，否则 WIFI），无需
+手动区分。串口模式下建议让 relay 常驻并自动重连：
+
+```bash
+systemd-run --user --unit=velaops-relay --collect -p Restart=always -p RestartSec=2 \
+  -p Environment=PORT=/dev/ttyACM0 -p Environment=SET_TIME=1 \
+  -p Environment=PROXY_HOST=127.0.0.1 -p Environment=PROXY_PORT=28790 \
+  -p Environment=FORWARD_HOST=127.0.0.1 -p Environment=FORWARD_PORT=28792 \
+  -p StandardOutput=file:/tmp/velaops-relay.log -p StandardError=file:/tmp/velaops-relay.log \
+  -p WorkingDirectory=$PWD \
+  /usr/bin/python3 docs/tools/serial_llm_relay.py
+```
+
+板子重新上电导致 USB CDC 换 `ttyACM` 号时，relay 会退出并由 systemd 重启、自动
+探测新端口重连，无需手工改端口。
+
 ## 4. AI Agent 只读巡检
 
 当设备配置中的 Agent 路由指向开发机的 `28792` 转发端口时，先启动受限的
