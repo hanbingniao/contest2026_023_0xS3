@@ -635,6 +635,27 @@ int velaops_autoconfig_run(int verbose)
 
   (void)verbose;
   printf("velaops autoconfig: 开始（等待驱动就绪）\n");
+
+  /* 先拉起屏显看板：否则 LCD 会一直白屏到自动配置全部完成（含认证重试，
+   * 最长 10 分钟）。看板在配置/隧道未就绪时显示等待/离线，就绪后自动出数。
+   * /tmp/velaops-no-monitor 可临时跳过。 */
+  {
+    extern int velaops_main(int argc, char *argv[]);
+    static char *const velaops_monitor_argv[] = { "monitor", NULL };
+    int monitor_pid;
+
+    if (access("/tmp/velaops-no-monitor", F_OK) == 0)
+      {
+        printf("velaops autoconfig: /tmp/velaops-no-monitor 存在，跳过看板\n");
+      }
+    else
+      {
+        monitor_pid = velaops_spawn_with_stack(velaops_main, "velaops-mon",
+                                               velaops_monitor_argv, 32768);
+        printf("velaops autoconfig: 屏显看板已启动 pid=%d\n", monitor_pid);
+      }
+  }
+
   sleep(5);
 
   status = velaops_autoconfig_mount_tf();
@@ -764,36 +785,6 @@ int velaops_autoconfig_run(int verbose)
     }
 
   printf("velaops autoconfig: 全部完成，ai_agent 已启动\n");
-
-  /* 屏显看板（5s 资源监测）是常驻任务，不拉起则屏幕保持白屏。
-   * 栈给 32KB；argv[0] 由内核自填，只传子命令。看板自带网络自愈：
-   * 连续巡检失败会自动续租/重新关联，/tmp/velaops-no-monitor 可临时关。 */
-  {
-    extern int velaops_main(int argc, char *argv[]);
-    static char *const velaops_monitor_argv[] = { "monitor", NULL };
-    int monitor_pid;
-
-    if (access("/tmp/velaops-no-monitor", F_OK) == 0)
-      {
-        printf("velaops autoconfig: /tmp/velaops-no-monitor 存在，跳过看板\n");
-      }
-    else
-      {
-        monitor_pid = velaops_spawn_with_stack(velaops_main, "velaops-mon",
-                                               velaops_monitor_argv, 32768);
-        if (monitor_pid < 0)
-          {
-            printf("velaops autoconfig: 屏显看板启动失败 (%d)\n",
-                   monitor_pid);
-          }
-        else
-          {
-            printf("velaops autoconfig: 屏显看板已启动 pid=%d\n",
-                   monitor_pid);
-          }
-      }
-  }
-
   return 0;
 }
 
