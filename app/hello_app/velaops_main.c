@@ -75,6 +75,7 @@
 #define VELAOPS_ASK_QUEUE_PATH "/tmp/vela-ask.txt"
 #define VELAOPS_LLM_DONE_PATH "/tmp/velaops-llm-done"
 #define VELAOPS_LLM_BUSY_PATH "/tmp/velaops-llm-busy"
+#define VELAOPS_REPAIR_BUSY_PATH "/tmp/velaops-repair-busy"
 #define VELAOPS_SKILL_PATH "/data/ai_agent/skills/server-incident-response.md"
 #define VELAOPS_LLM_PROMPT_CAPACITY 6144
 #define VELAOPS_LLM_SKILL_CAPACITY 4096
@@ -463,6 +464,7 @@ static int velaops_fetch_resources_for_agent(char *output,
 }
 
 static void velaops_popup_write(const char *title, const char *text);
+static void velaops_repair_busy_set(bool on);
 
 static int velaops_repair_demo_service(char *output, size_t output_capacity)
 {
@@ -490,22 +492,14 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
   printf("velaops: 请在 120 秒内按住 BOOT 2 秒批准重启 demo 服务\n");
   /* 明确"批准什么动作 + 怎么按"：前 12 字符一行，后 12 字符一行。 */
   velaops_popup_write("APPROVAL", "RESTART DEMOHOLD BOOT 2S");
-  /* 从等待批准开始就置 busy：让看板不抢着消除弹窗、不抢隧道。 */
-  {
-    FILE *busy = fopen(VELAOPS_LLM_BUSY_PATH, "w");
-
-    if (busy != NULL)
-      {
-        fputs("approval", busy);
-        fclose(busy);
-      }
-  }
+  /* 等待/执行期间置 repair-busy：看板据此不消弹窗、不抢隧道；结束时清除，
+   * 看板自动回到资源看板。 */
+  velaops_repair_busy_set(true);
   approval_result = velaops_button_wait_for_long_press(
       VELAOPS_APPROVAL_HOLD_MS, VELAOPS_APPROVAL_TIMEOUT_MS);
   if (approval_result == VELAOPS_BUTTON_TIMEOUT)
     {
-      velaops_popup_write("APPROVAL", "TIMEOUT");
-      unlink(VELAOPS_LLM_BUSY_PATH);
+      velaops_repair_busy_set(false);
       return velaops_guarded_repair_format_result(
           "not_started", false, "approval_timeout", 0,
           output, output_capacity);
@@ -514,30 +508,18 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
       getrandom(approval_random, sizeof(approval_random), GRND_RANDOM) !=
       sizeof(approval_random))
     {
-      velaops_popup_write("APPROVAL", "REJECTED");
-      unlink(VELAOPS_LLM_BUSY_PATH);
+      velaops_repair_busy_set(false);
       return velaops_guarded_repair_format_result(
           "not_started", false, "approval_unavailable", 0,
           output, output_capacity);
     }
 
-  velaops_popup_write("REPAIR", "IN PROGRESS");
-  /* 修复期间让看板暂停巡检，避免与重启/复核请求抢单条隧道导致超时。 */
-  {
-    FILE *busy = fopen(VELAOPS_LLM_BUSY_PATH, "w");
-
-    if (busy != NULL)
-      {
-        fputs("repair", busy);
-        fclose(busy);
-      }
-  }
   approved_at = time(NULL);
   velaops_hex_encode(approval_random, sizeof(approval_random), approval_id);
 
-  /* 重启请求的回包可能因传输抖动丢失，但服务端其实已执行；因此**无论请求
-   * 返回值如何都继续做只读复核**，用独立证据判定成败，而不是一见超时就报
-   * unknown。复核成功则视为已完成（verified=true）。 */
+  /* 批准后直接重启（不再显示 IN PROGRESS）。重启请求的回包可能因传输抖动
+   * 丢失，但服务端其实已执行；因此**无论请求返回值如何都继续做只读复核**，
+   * 用独立证据判定成败。复核成功后清除 repair-busy，看板自动回到资源看板。 */
   request_sent = velaops_guarded_repair_build_request(
                      approval_id, (int64_t)approved_at,
                      (int64_t)approved_at + VELAOPS_APPROVAL_VALIDITY_SECONDS,
@@ -557,23 +539,20 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
           velaops_guarded_repair_verify(resources, &recovered) == 0 &&
           recovered)
         {
-          velaops_popup_write("REPAIR", "OK RECOVERED");
-          unlink(VELAOPS_LLM_BUSY_PATH);
+          velaops_repair_busy_set(false);
           return velaops_guarded_repair_format_result(
               "completed", true, "recovered", attempt,
               output, output_capacity);
         }
     }
 
-  unlink(VELAOPS_LLM_BUSY_PATH);
+  velaops_repair_busy_set(false);
   if (!request_sent)
     {
-      velaops_popup_write("REPAIR", "EXEC FAILED");
       return velaops_guarded_repair_format_result(
           "unknown", false, "execution_failed", 0,
           output, output_capacity);
     }
-  velaops_popup_write("REPAIR", "VERIFY FAILED");
   return velaops_guarded_repair_format_result(
       "completed", false, "verification_failed",
       VELAOPS_REPAIR_VERIFY_ATTEMPTS, output, output_capacity);
@@ -703,6 +682,24 @@ static void velaops_popup_write(const char *title, const char *text)
       fprintf(file, "%s\n%s", title != NULL ? title : "ALERT",
               text != NULL ? text : "");
       fclose(file);
+    }
+}
+
+static void velaops_repair_busy_set(bool on)
+{
+  if (on)
+    {
+      FILE *file = fopen(VELAOPS_REPAIR_BUSY_PATH, "w");
+
+      if (file != NULL)
+        {
+          fputs("repair", file);
+          fclose(file);
+        }
+    }
+  else
+    {
+      unlink(VELAOPS_REPAIR_BUSY_PATH);
     }
 }
 
@@ -855,10 +852,11 @@ static void *velaops_button_worker(void *argument)
               (context->previous & context->supported) == 0)
             {
               pthread_mutex_lock(context->display_lock);
-              if (access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0)
+              if (access(VELAOPS_REPAIR_BUSY_PATH, F_OK) == 0 ||
+                  access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0)
                 {
-                  /* 批准/修复进行中：这次按键是给"长按批准"用的，看板不要
-                   * 抢着消除弹窗，否则用户一按提示就消失、体验很差。 */
+                  /* 批准/修复/诊断进行中：这次按键是给"长按批准"或诊断用的，
+                   * 看板不要抢着消除弹窗，否则用户一按提示就消失、体验很差。 */
                 }
               else if (context->alarm_active != NULL &&
                        *context->alarm_active != 0)
@@ -1184,6 +1182,7 @@ int main(int argc, char *argv[])
       int attempt;
       int link_state = 0;   /* 0=等待首个成功连接 1=已连接 2=连接中断 */
       int was_link = 1;
+      int was_repair = 0;
       time_t next_redraw = 0;
       char alarm_text[25] = {0};
       char alarm_title[20] = "ALERT";
@@ -1272,7 +1271,8 @@ int main(int argc, char *argv[])
                * 若与看板巡检并发会让批准后的重启请求超时失败。 */
               if ((g_llm_pause_until > 0 &&
                    time(NULL) < g_llm_pause_until) ||
-                  access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0)
+                  access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0 ||
+                  access(VELAOPS_REPAIR_BUSY_PATH, F_OK) == 0)
                 {
                   /* Agent 回发钩子标记诊断完成即放行，否则等到兜底上限。 */
                   if (access(VELAOPS_LLM_DONE_PATH, F_OK) == 0)
@@ -1422,6 +1422,20 @@ int main(int argc, char *argv[])
                 pthread_mutex_unlock(&display_lock);
                 force_render = 1;
               }
+          }
+
+          /* 修复结束（repair-busy 消失）：清掉弹窗，回到资源看板。 */
+          {
+            int repair_now = access(VELAOPS_REPAIR_BUSY_PATH, F_OK) == 0;
+
+            if (was_repair && !repair_now)
+              {
+                pthread_mutex_lock(&display_lock);
+                alarm_active = 0;
+                pthread_mutex_unlock(&display_lock);
+                force_render = 1;
+              }
+            was_repair = repair_now;
           }
 
           /* 告警框或连接状态框激活时按节奏闪烁（板载 LED 同步）。 */
