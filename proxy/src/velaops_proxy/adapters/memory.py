@@ -42,12 +42,18 @@ class InMemoryDeviceSecretStore:
 class InMemoryReplayStore:
     """有界、线程安全的 nonce 存储，登记操作在锁内保持原子性。"""
 
+    # 串口隧道在 ACK 丢失时会重发同一请求（同 nonce）。若一律拒绝，重发会被判
+    # replay，导致"服务其实已执行却报失败"。这里对短时间内（<=窗口）的同 nonce
+    # 重发予以放行——执行侧仍按 request_id 幂等，重复请求只会拿到缓存结果，不会
+    # 重复执行；只读 Action 重复执行也无副作用。
+    RETRANSMIT_TOLERANCE_SECONDS = 40
+
     def __init__(self, max_entries: int = DEFAULT_MAX_REPLAY_ENTRIES) -> None:
         if max_entries <= 0:
             raise ValueError("max_entries 必须大于零")
         self._max_entries = max_entries
         self._lock = RLock()
-        self._entries: dict[tuple[str, str], int] = {}
+        self._entries: dict[tuple[str, str], tuple[int, int]] = {}
 
     def claim(
         self,
@@ -60,16 +66,24 @@ class InMemoryReplayStore:
         key = (device_id, nonce)
         with self._lock:
             # expires_at 使用开区间：到期秒开始即可清理。
-            expired = [item for item, expiry in self._entries.items() if expiry <= now]
+            expired = [
+                item
+                for item, (_expiry, _seen) in self._entries.items()
+                if _expiry <= now
+            ]
             for item in expired:
                 del self._entries[item]
 
-            if key in self._entries:
+            existing = self._entries.get(key)
+            if existing is not None:
+                _expiry, first_seen = existing
+                if now - first_seen <= self.RETRANSMIT_TOLERANCE_SECONDS:
+                    return True  # 视为同一请求的重发，允许
                 return False
             if len(self._entries) >= self._max_entries:
                 raise ReplayStoreError("nonce 存储容量已满")
 
-            self._entries[key] = expires_at
+            self._entries[key] = (expires_at, now)
             return True
 
     def __len__(self) -> int:

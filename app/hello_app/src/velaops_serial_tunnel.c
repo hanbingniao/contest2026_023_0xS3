@@ -519,6 +519,13 @@ int velaops_serial_tunnel_run(void)
                     acked = 1;
                     break;
                   }
+                /* ACK 丢了但请求其实已被 relay 收下并回了响应：直接视为成功，
+                 * 避免重发同一请求（同 nonce）被 Proxy 判 replay。 */
+                if (access(VELAOPS_TUNNEL_IN_READY, F_OK) == 0)
+                  {
+                    acked = 1;
+                    break;
+                  }
                 if (access(VELAOPS_TUNNEL_NACK, F_OK) == 0)
                   {
                     break;

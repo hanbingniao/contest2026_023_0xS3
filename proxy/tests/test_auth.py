@@ -134,11 +134,29 @@ class AuthenticationTest(unittest.TestCase):
                 )
                 self.assertEqual(result.metadata, metadata)
 
-    def test_rejects_replayed_nonce(self):
+    def test_retransmit_within_tolerance_is_accepted(self):
+        # 串口隧道在 ACK 丢失时会重发同一请求（同 nonce）。短时间内视为重传放行，
+        # 实际执行由 Action 层的 request_id 幂等兜底，不会重复执行。
         self.authenticate()
-        self.assert_audit_code(ErrorCode.REPLAY_DETECTED, self.authenticate)
+        result = self.authenticate()
+        self.assertEqual(result.metadata, self.metadata)
 
-    def test_nonce_claim_is_atomic_under_concurrency(self):
+    def test_replay_after_tolerance_is_rejected(self):
+        self.replay.claim(
+            self.metadata.device_id,
+            self.metadata.nonce,
+            expires_at=self.clock.now + 600,
+            now=self.clock.now,
+        )
+        allowed = self.replay.claim(
+            self.metadata.device_id,
+            self.metadata.nonce,
+            expires_at=self.clock.now + 600,
+            now=self.clock.now + InMemoryReplayStore.RETRANSMIT_TOLERANCE_SECONDS + 1,
+        )
+        self.assertFalse(allowed)
+
+    def test_nonce_retransmit_is_thread_safe(self):
         def attempt(_):
             try:
                 self.authenticate()
@@ -148,8 +166,8 @@ class AuthenticationTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=16) as pool:
             results = list(pool.map(attempt, range(32)))
-        self.assertEqual(results.count("ok"), 1)
-        self.assertEqual(results.count(ErrorCode.REPLAY_DETECTED), 31)
+        # 同一请求的并发重传均被容忍（不再因重传被判 replay）。
+        self.assertEqual(results.count("ok"), 32)
 
     def test_replay_store_capacity_fails_closed(self):
         replay = InMemoryReplayStore(max_entries=1)
