@@ -59,6 +59,7 @@ def main() -> None:
         "schema_version",
         "status",
         "summary",
+        "display",
         "evidence",
         "root_cause_candidates",
         "recommended_action",

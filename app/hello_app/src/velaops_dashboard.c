@@ -3,7 +3,7 @@
  *
  * 参考成熟运维工具（top/htop/glances）的信息层级：顶部状态条给出总体健康
  * 与数据新鲜度，正文用大号数值 + 条形/柱形仪表突出关键指标，页脚给出操作
- * 提示。三页分别为：
+ * 提示。资源三页外再提供 LLM 结论三页：
  *   0) 概览：总体状态 + CPU/内存/磁盘三柱仪表 + 服务/端口速览
  *   1) 性能：CPU 使用率 + 负载 + 历史曲线，内存用量与明细
  *   2) 运维：服务状态、端口连通性、磁盘占用与数据更新时间
@@ -633,7 +633,44 @@ static void draw_ops(dashboard_canvas_t *canvas,
                level_color(disk, 80.0, 92.0));
   draw_bar(canvas, 12, 168, 216, 10, disk, level_color(disk, 80.0, 92.0));
 
-  draw_text(canvas, 12, 190, "BOOT BUTTON: NEXT PAGE", 1, color_muted());
+  draw_text(canvas, 12, 190, "BOOT: NEXT PAGE", 1, color_muted());
+}
+
+/* LLM 回复拆成三页，避免在 5x7 字库上压缩成一条难读的长句。 */
+static void draw_llm_page(dashboard_canvas_t *canvas, unsigned int subpage)
+{
+  const char *titles[] = {"LLM SUMMARY", "LLM ROOT CAUSE", "LLM ACTION"};
+  char line[128] = {0};
+  FILE *file;
+  unsigned int index;
+
+  draw_text(canvas, 12, CONTENT_TOP, titles[subpage], 1, color_muted());
+  file = fopen("/tmp/velaops-llm-pages.txt", "r");
+  if (file == NULL)
+    {
+      draw_text(canvas, 12, CONTENT_TOP + 22, "WAITING FOR LLM", 2,
+                color_muted());
+      return;
+    }
+
+  for (index = 0; index <= subpage; index++)
+    {
+      if (fgets(line, sizeof(line), file) == NULL)
+        {
+          line[0] = '\0';
+          break;
+        }
+    }
+  fclose(file);
+  line[strcspn(line, "\r\n")] = '\0';
+  line[18] = '\0';
+  if (line[0] == '\0')
+    {
+      snprintf(line, sizeof(line), "NO %s", subpage == 0 ? "SUMMARY" :
+               subpage == 1 ? "ROOT CAUSE" : "ACTION");
+    }
+  draw_text(canvas, 12, CONTENT_TOP + 24, line, 2, color_text());
+  draw_text(canvas, 12, 190, "BOOT: LLM PAGES", 1, color_muted());
 }
 
 int velaops_dashboard_render(uint16_t *pixels, size_t pixel_count,
@@ -662,9 +699,13 @@ int velaops_dashboard_render(uint16_t *pixels, size_t pixel_count,
     {
       draw_performance(&canvas, state);
     }
-  else
+  else if (page == 2)
     {
       draw_ops(&canvas, state);
+    }
+  else
+    {
+      draw_llm_page(&canvas, page - 3);
     }
 
   return 0;

@@ -388,3 +388,18 @@ PORT=/dev/ttyACM0 python3 docs/tools/debug_event_gui.py
   主动改接口的自愈后，同一条只读链路上 `ai_agent + 屏显看板` 连续运行 12 分钟、
   139 次 5 秒巡检全部成功，Proxy 审计 140 条请求平均间隔 5.30s、零错误、零自愈
   （`transport_error=0`）；此前多轮 5~8 分钟测试同样零错误。
+
+## 9. 英文 LLM 结论与看板验收（真机已跑通）
+
+编译前执行 `bash docs/tools/apply_nuttx_patches.sh`。LLM 诊断会把英文 summary、根因和建议
+分别写入三页 LCD 内容（页 3~5：`LLM SUMMARY` / `LLM ROOT CAUSE` / `LLM ACTION`）；诊断
+结论写出后看板会**自动跳到 LLM SUMMARY 页**，告警弹窗仍会同时弹出，短按 `BOOT` 消除弹窗
+后即见该页。
+
+**按键（当前保底方案）**：`BOOT` 短按翻页（6 页循环），`BOOT` 长按 2 秒批准修复。
+ESP32-S3-EYE 的 MENU/PLAY/UP+/DOWN 接 ADC1_CH0（GPIO1）电阻梯，原理图与官方 BSP 均已
+确认，但 NuttX `esp32s3_adc.c` 读出恒为 ~1334mV、按任何键不变（驱动层问题），故暂用
+BOOT 单键保底；`patches/vendor/0002` 保留 ADC 映射以便后续修复。
+
+**LLM 提示约束（踩坑）**：ai_agent 的文件 ask 通道只读第一行，故诊断 prompt 必须单行；
+且提示里 `display` 后不能跟空格（`play ` 会被 NL 快速通道误判成播放音乐）。

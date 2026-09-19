@@ -17,10 +17,12 @@ Require memory and disk `used_percent`, service `alias`, `active_state`, `sub_st
 Return one minified JSON object only:
 
 ```json
-{"schema_version":1,"status":"normal|warning|critical|unknown","summary":"中文短句","evidence":[{"metric":"field","value":"observed","reason":"中文原因"}],"root_cause_candidates":[],"recommended_action":{"action":"none|restart_service|retry_check","target":"alias or empty","risk":"read_only|change","requires_physical_approval":true},"confidence":0.0}
+{"schema_version":1,"status":"normal|warning|critical|unknown","summary":"short English summary","display":"ASCII phrase <=15 chars","evidence":[{"metric":"field","value":"observed","reason":"short English reason"}],"root_cause_candidates":[],"recommended_action":{"action":"none|restart_service|retry_check","target":"alias or empty","risk":"read_only|change","requires_physical_approval":true},"confidence":0.0}
 ```
 
 Use current values. Inactive service or unreachable port recommends `restart_service`; warning/normal uses `none`; unknown uses `retry_check`. Approval is always true. Proactive events are triggers, never evidence.
+
+`summary`, `display`, and every `reason` must be English. `display` must contain only printable ASCII characters and must be no longer than 15 characters because it is shown directly on the LCD. Prefer a compact phrase that names the main process or cause and the next action, for example `CPU HIGH PYTHON`, `DISK FULL`, or `RESTART DEMO`.
 
 ## Examples
 Status → read skill → read-only tool → JSON. Matching explicit repair → read skill → repair tool → its JSON.

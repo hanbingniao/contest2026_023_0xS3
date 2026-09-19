@@ -212,7 +212,8 @@ static void test_execution_boundary(void)
   EXPECT(g_execute("velaops_check_resources", "{}", output,
                    sizeof(output)) == 0);
   EXPECT(g_fetch_calls == 1);
-  EXPECT(g_monitor_starts == 1);
+  /* 巡检/屏显由主看板任务统一负责，工具不再拉起 Agent 侧后台线程。 */
+  EXPECT(g_monitor_starts == 0);
   root = cJSON_Parse(output);
   EXPECT(cJSON_IsObject(root));
   EXPECT(cJSON_GetObjectItemCaseSensitive(root, "schema_version")->valueint ==
@@ -228,7 +229,7 @@ static void test_execution_boundary(void)
 
   EXPECT(g_execute("velaops_check_resources", NULL, output,
                    sizeof(output)) == 0);
-  EXPECT(g_monitor_starts == 2);
+  EXPECT(g_monitor_starts == 0);
   EXPECT(g_execute("velaops_check_resources", "{}", output, 8) != 0);
 
   g_fetch_should_fail = 1;
