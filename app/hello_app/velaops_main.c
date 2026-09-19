@@ -76,6 +76,8 @@
 #define VELAOPS_LLM_DONE_PATH "/tmp/velaops-llm-done"
 #define VELAOPS_LLM_BUSY_PATH "/tmp/velaops-llm-busy"
 #define VELAOPS_REPAIR_BUSY_PATH "/tmp/velaops-repair-busy"
+#define VELAOPS_APPROVE_PATH "/tmp/velaops-approve"
+#define VELAOPS_APPROVE_HOLD_SECONDS 2
 #define VELAOPS_SKILL_PATH "/data/ai_agent/skills/server-incident-response.md"
 #define VELAOPS_LLM_PROMPT_CAPACITY 6144
 #define VELAOPS_LLM_SKILL_CAPACITY 4096
@@ -495,8 +497,24 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
   /* 等待/执行期间置 repair-busy：看板据此不消弹窗、不抢隧道；结束时清除，
    * 看板自动回到资源看板。 */
   velaops_repair_busy_set(true);
-  approval_result = velaops_button_wait_for_long_press(
-      VELAOPS_APPROVAL_HOLD_MS, VELAOPS_APPROVAL_TIMEOUT_MS);
+  /* 按键由看板按键线程统一读取（长按达标后写 VELAOPS_APPROVE_PATH），这里只
+   * 等待该信号；避免两个线程同时读 /dev/buttons 导致本侧读不到长按。 */
+  unlink(VELAOPS_APPROVE_PATH);
+  approval_result = VELAOPS_BUTTON_TIMEOUT;
+  {
+    unsigned int waited;
+
+    for (waited = 0; waited < VELAOPS_APPROVAL_TIMEOUT_MS; waited += 200)
+      {
+        if (access(VELAOPS_APPROVE_PATH, F_OK) == 0)
+          {
+            unlink(VELAOPS_APPROVE_PATH);
+            approval_result = VELAOPS_BUTTON_APPROVED;
+            break;
+          }
+        usleep(200000);
+      }
+  }
   if (approval_result == VELAOPS_BUTTON_TIMEOUT)
     {
       velaops_repair_busy_set(false);
@@ -730,13 +748,13 @@ static bool velaops_monitor_consume_popup(char *title, size_t title_capacity,
   if (newline != NULL)
     {
       *newline = '\0';
-      snprintf(title, title_capacity, "%s", raw);
-      snprintf(buffer, capacity, "%s", newline + 1);
+      snprintf(title, title_capacity, "%.*s", (int)(title_capacity - 1), raw);
+      snprintf(buffer, capacity, "%.*s", (int)(capacity - 1), newline + 1);
     }
   else
     {
       snprintf(title, title_capacity, "ALERT");
-      snprintf(buffer, capacity, "%s", raw);
+      snprintf(buffer, capacity, "%.*s", (int)(capacity - 1), raw);
     }
   return buffer[0] != '\0';
 }
@@ -843,13 +861,43 @@ static void *velaops_button_worker(void *argument)
 {
   struct velaops_button_context_s *context = argument;
   btn_buttonset_t sample;
+  time_t press_started = 0;
+  int approved = 0;
 
   for (;;)
     {
       if (read(context->fd, &sample, sizeof(sample)) == sizeof(sample))
         {
-          if ((sample & context->supported) != 0 &&
-              (context->previous & context->supported) == 0)
+          int pressed = (sample & context->supported) != 0;
+
+          if (!pressed)
+            {
+              press_started = 0;
+              approved = 0;
+            }
+          else if (press_started == 0)
+            {
+              press_started = time(NULL);
+              approved = 0;
+            }
+
+          /* 批准/修复进行中：统一由本线程读按键；长按达到阈值即写批准信号，
+           * 修复流程据此放行——避免修复线程与看板线程抢读 /dev/buttons。 */
+          if (pressed && !approved &&
+              access(VELAOPS_REPAIR_BUSY_PATH, F_OK) == 0 &&
+              time(NULL) - press_started >= VELAOPS_APPROVE_HOLD_SECONDS)
+            {
+              FILE *file = fopen(VELAOPS_APPROVE_PATH, "w");
+
+              if (file != NULL)
+                {
+                  fputs("ok", file);
+                  fclose(file);
+                }
+              approved = 1;
+            }
+
+          if (pressed && (context->previous & context->supported) == 0)
             {
               pthread_mutex_lock(context->display_lock);
               if (access(VELAOPS_REPAIR_BUSY_PATH, F_OK) == 0 ||
