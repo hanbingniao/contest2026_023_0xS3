@@ -51,7 +51,127 @@
       "collection_mode": "cli",
       "health": "ok",
       "model": "mimo-v2.5-pro"
+    },
+    {
+      "session_id": "ses_fffa63518ffeIa0nEYIid4a06P",
+      "tool": "opencode",
+      "started_at": "2026-08-14T12:57:59.800Z",
+      "last_event_at": "2026-08-14T12:57:59.816Z",
+      "event_count": 2,
+      "file_path": "logs/hanbingniao/2026-08-14/opencode__ses_fffa63518ffeIa0nEYIid4a06P.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fff7a1173ffejyz5U8jkKA6sri",
+      "tool": "opencode",
+      "started_at": "2026-08-14T13:46:12.514Z",
+      "last_event_at": "2026-08-14T13:49:30.366Z",
+      "event_count": 4,
+      "file_path": "logs/hanbingniao/2026-08-14/opencode__ses_fff7a1173ffejyz5U8jkKA6sri.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fff728a8affe9xez4wEnF5vj1h",
+      "tool": "opencode",
+      "started_at": "2026-08-14T13:54:25.800Z",
+      "last_event_at": "2026-08-14T13:57:09.184Z",
+      "event_count": 14,
+      "file_path": "logs/hanbingniao/2026-08-14/opencode__ses_fff728a8affe9xez4wEnF5vj1h.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_ffb571868ffewE4dNAS2Z2xI5e",
+      "tool": "opencode",
+      "started_at": "2026-08-15T09:02:53.403Z",
+      "last_event_at": "2026-08-15T10:07:38.865Z",
+      "event_count": 180,
+      "file_path": "logs/hanbingniao/2026-08-15/opencode__ses_ffb571868ffewE4dNAS2Z2xI5e.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_ffb1aace3ffeq6dLTiAg7lFY6c",
+      "tool": "opencode",
+      "started_at": "2026-08-15T10:08:53.037Z",
+      "last_event_at": "2026-08-24T11:39:48.787Z",
+      "event_count": 1003,
+      "file_path": "logs/hanbingniao/2026-08-15/opencode__ses_ffb1aace3ffeq6dLTiAg7lFY6c.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fcb76ffb1ffeqRuadg5OAHqBsX",
+      "tool": "opencode",
+      "started_at": "2026-08-24T16:09:48.900Z",
+      "last_event_at": "2026-08-24T16:09:48.900Z",
+      "event_count": 1,
+      "file_path": "logs/hanbingniao/2026-08-24/opencode__ses_fcb76ffb1ffeqRuadg5OAHqBsX.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fcb6c2e50ffeKqHVHsoTu8yiYD",
+      "tool": "opencode",
+      "started_at": "2026-08-24T16:21:37.903Z",
+      "last_event_at": "2026-08-24T16:22:23.804Z",
+      "event_count": 3,
+      "file_path": "logs/hanbingniao/2026-08-24/opencode__ses_fcb6c2e50ffeKqHVHsoTu8yiYD.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fcb6b3691ffe7gNu6nvkILGHA3",
+      "tool": "opencode",
+      "started_at": "2026-08-24T16:22:41.278Z",
+      "last_event_at": "2026-08-24T16:22:41.278Z",
+      "event_count": 1,
+      "file_path": "logs/hanbingniao/2026-08-24/opencode__ses_fcb6b3691ffe7gNu6nvkILGHA3.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fcb6a6292ffeyN85dOcYc5Sw1V",
+      "tool": "opencode",
+      "started_at": "2026-08-24T16:23:35.557Z",
+      "last_event_at": "2026-08-25T14:13:20.757Z",
+      "event_count": 335,
+      "file_path": "logs/hanbingniao/2026-08-24/opencode__ses_fcb6a6292ffeyN85dOcYc5Sw1V.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_fc6bdf333ffe36AOuYEpdw6010",
+      "tool": "opencode",
+      "started_at": "2026-08-25T14:10:25.132Z",
+      "last_event_at": "2026-08-25T14:13:03.791Z",
+      "event_count": 4,
+      "file_path": "logs/hanbingniao/2026-08-25/opencode__ses_fc6bdf333ffe36AOuYEpdw6010.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_f625aeaa9ffenXrvQD9KfYpHWT",
+      "tool": "opencode",
+      "started_at": "2026-09-14T02:00:36.995Z",
+      "last_event_at": "2026-09-14T15:31:08.313Z",
+      "event_count": 118,
+      "file_path": "logs/hanbingniao/2026-09-14/opencode__ses_f625aeaa9ffenXrvQD9KfYpHWT.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
+    },
+    {
+      "session_id": "ses_f5c33c4a7ffeop4MqPgqGI4hJv",
+      "tool": "opencode",
+      "started_at": "2026-09-15T06:41:05.939Z",
+      "last_event_at": "2026-09-19T14:13:18.695Z",
+      "event_count": 610,
+      "file_path": "logs/hanbingniao/2026-09-15/opencode__ses_f5c33c4a7ffeop4MqPgqGI4hJv.jsonl",
+      "collection_mode": "backfill-sqlite",
+      "health": "ok"
     }
   ],
-  "updated_at": "2026-09-13T11:12:12.014883+00:00"
+  "updated_at": "2026-09-19T14:16:47.092738+00:00"
 }

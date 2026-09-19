@@ -1,0 +1,4 @@
+{"schema_version": "1.0", "session_id": "ses_fc6bdf333ffe36AOuYEpdw6010", "team_id": "contest2026_023_0xS3", "github_login": "hanbingniao", "tool": "opencode", "seq": 0, "ts": "2026-08-25T14:10:25.132Z", "role": "user", "text": "测试"}
+{"schema_version": "1.0", "session_id": "ses_fc6bdf333ffe36AOuYEpdw6010", "team_id": "contest2026_023_0xS3", "github_login": "hanbingniao", "tool": "opencode", "seq": 1, "ts": "2026-08-25T14:10:25.155Z", "role": "assistant", "text": "测试成功，当前工作区可用。"}
+{"schema_version": "1.0", "session_id": "ses_fc6bdf333ffe36AOuYEpdw6010", "team_id": "contest2026_023_0xS3", "github_login": "hanbingniao", "tool": "opencode", "seq": 2, "ts": "2026-08-25T14:13:03.772Z", "role": "user", "text": "测试"}
+{"schema_version": "1.0", "session_id": "ses_fc6bdf333ffe36AOuYEpdw6010", "team_id": "contest2026_023_0xS3", "github_login": "hanbingniao", "tool": "opencode", "seq": 3, "ts": "2026-08-25T14:13:03.791Z", "role": "assistant", "text": "收到，测试正常。"}
