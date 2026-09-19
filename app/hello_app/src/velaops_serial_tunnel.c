@@ -32,8 +32,8 @@
  * 板端只重发缺块，因此日志偶发插帧也能自愈；请求被 relay 完整收下后回 ACK，
  * 板端随即停止重发、只等响应。 */
 #define VELAOPS_TUNNEL_CHUNK 120
-#define VELAOPS_TUNNEL_MAX_ROUNDS 6
-#define VELAOPS_TUNNEL_ROUND_WAIT_MS 1500
+#define VELAOPS_TUNNEL_MAX_ROUNDS 10
+#define VELAOPS_TUNNEL_ROUND_WAIT_MS 3500
 #define VELAOPS_TUNNEL_FAST_READY_MS 12000
 /* 必须大于 relay 的转发超时（180s）：否则本端先放弃并前进，随后会收到那条
  * 陈旧响应造成错位/卡死。留足余量覆盖大上下文 LLM 请求。 */
