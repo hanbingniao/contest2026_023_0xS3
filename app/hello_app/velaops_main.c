@@ -1098,6 +1098,8 @@ int main(int argc, char *argv[])
       int blink_phase = 0;
       int blink_tick = 0;
       int led_fd;
+      int attempt;
+      time_t next_redraw = 0;
       char alarm_text[25] = {0};
 
       if (velaops_resource_incident_init(
@@ -1109,7 +1111,17 @@ int main(int argc, char *argv[])
           return EXIT_FAILURE;
         }
 
-      display = velaops_display_open();
+      /* 看板现在开机即起，可能与板级初始化（相机等）并发，/dev/lcd0 尚未就绪
+       * 时会 open 失败；带重试，失败也不退出，避免整块屏留白。 */
+      display = NULL;
+      for (attempt = 0; attempt < 40 && display == NULL; attempt++)
+        {
+          display = velaops_display_open();
+          if (display == NULL)
+            {
+              usleep(500000);
+            }
+        }
       if (display == NULL)
         {
           fprintf(stderr, "velaops: 无法打开 /dev/lcd0\n");
@@ -1160,6 +1172,14 @@ int main(int argc, char *argv[])
       next_refresh = time(NULL) + velaops_monitor_startup_delay();
       for (;;)
         {
+          /* 周期重绘：即使巡检尚未出数，也保证屏上有内容并能自愈偶发花屏
+           * （例如板级初始化与看板并发时的短暂干扰）。 */
+          if (time(NULL) >= next_redraw)
+            {
+              force_render = 1;
+              next_redraw = time(NULL) + 2;
+            }
+
           if (time(NULL) >= next_refresh)
             {
               /* LLM 诊断窗口内让路：隧道同一时刻只能服务一个请求，
