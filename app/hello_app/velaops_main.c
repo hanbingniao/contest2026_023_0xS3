@@ -1152,6 +1152,10 @@ int main(int argc, char *argv[])
           velaops_display_close(display);
           return EXIT_FAILURE;
         }
+      /* 开机画面：先显示品牌启动框，避免上电后 LCD 长时间白屏。 */
+      velaops_display_show_message(display, "VELAOPS", "BOOTING", 0);
+      sleep(4);
+
       velaops_display_show(display, &state, page);
       next_refresh = time(NULL) + velaops_monitor_startup_delay();
       for (;;)
