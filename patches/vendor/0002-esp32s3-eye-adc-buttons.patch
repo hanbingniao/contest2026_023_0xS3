@@ -1,0 +1,110 @@
+diff --git a/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig b/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig
+index 6f2dc72..2730007 100644
+--- a/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig
++++ b/boards/esp32s3/esp32s3-eye/configs/openvela/defconfig
+@@ -29,6 +29,8 @@ CONFIG_ARCH_XTENSA=y
+ CONFIG_AUDIO=y
+ CONFIG_AUDIO_I2S=y
+ CONFIG_BOARD_CUSTOM_BUTTONS=y
++CONFIG_ESP32S3_ADC=y
++CONFIG_ESP32S3_ADC1_CHANNEL0=y
+ CONFIG_BOARD_CUSTOM_IRQBUTTONS=y
+ CONFIG_BOARD_CUSTOM_LEDS=y
+ CONFIG_BOARD_LOOPSPERMSEC=16717
+diff --git a/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c b/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c
+index 278bc79..300ef90 100644
+--- a/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c
++++ b/boards/esp32s3/esp32s3-eye/src/esp32s3_bringup.c
+@@ -101,6 +101,9 @@
+ #endif
+ 
+ #include "esp32s3-eye.h"
++#ifdef CONFIG_ESP32S3_ADC
++#  include "esp32s3_board_adc.h"
++#endif
+ 
+ /****************************************************************************
+  * Public Functions
+@@ -123,6 +126,14 @@
+ int esp32s3_bringup(void)
+ {
+   int ret;
++#ifdef CONFIG_ESP32S3_ADC
++  /* 注册 ADC1_CH0，ESP32-S3-EYE 的四个功能键共用该电阻梯。 */
++  ret = board_adc_init();
++  if (ret < 0)
++    {
++      syslog(LOG_ERR, "ERROR: board_adc_init failed: %d\n", ret);
++    }
++#endif
+ #ifdef CONFIG_SENSORS_QMA7981
+   FAR struct i2c_master_s *qma_i2c;
+ #endif
+diff --git a/boards/esp32s3/esp32s3-eye/src/esp32s3_buttons.c b/boards/esp32s3/esp32s3-eye/src/esp32s3_buttons.c
+index db9b1d4..241eaf5 100644
+--- a/boards/esp32s3/esp32s3-eye/src/esp32s3_buttons.c
++++ b/boards/esp32s3/esp32s3-eye/src/esp32s3_buttons.c
+@@ -29,8 +29,13 @@
+ #include <assert.h>
+ #include <debug.h>
+ #include <stdbool.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
+ 
+ #include <nuttx/arch.h>
++#include <nuttx/analog/adc.h>
++#include <nuttx/analog/ioctl.h>
+ #include <nuttx/board.h>
+ #include <nuttx/irq.h>
+ 
+@@ -39,6 +43,12 @@
+ 
+ #include "esp32s3-eye.h"
+ 
++#define BUTTON_MENU  (1U << 1)
++#define BUTTON_PLAY  (1U << 2)
++#define BUTTON_DOWN  (1U << 3)
++#define BUTTON_UP    (1U << 4)
++static int g_button_adc_fd = -1;
++
+ /****************************************************************************
+  * Public Functions
+  ****************************************************************************/
+@@ -57,7 +67,27 @@
+ uint32_t board_button_initialize(void)
+ {
+   esp32s3_configgpio(BUTTON_BOOT, INPUT_FUNCTION_2 | PULLUP);
+-  return 1;
++  g_button_adc_fd = open("/dev/adc0", O_RDONLY | O_NONBLOCK);
++  return 5;
++}
++
++static uint32_t board_adc_button(void)
++{
++  struct adc_msg_s message;
++  int32_t value;
++
++  if (g_button_adc_fd < 0 || ioctl(g_button_adc_fd, ANIOC_TRIGGER, 0) < 0 ||
++      read(g_button_adc_fd, &message, sizeof(message)) != sizeof(message))
++    {
++      return 0;
++    }
++
++  value = message.am_data;
++  if (value >= 2250 && value <= 2600) return BUTTON_MENU;
++  if (value >= 1700 && value <= 2200) return BUTTON_PLAY;
++  if (value >= 650 && value <= 1000) return BUTTON_DOWN;
++  if (value >= 200 && value <= 550) return BUTTON_UP;
++  return 0;
+ }
+ 
+ /****************************************************************************
+@@ -110,6 +140,7 @@ uint32_t board_buttons(void)
+     {
+       ret = 0x1;
+     }
++  ret |= board_adc_button();
+ 
+   return ret;
+ }

@@ -320,3 +320,62 @@ AI 只读诊断、主动触发、实体批准和设备侧复核已形成可演�
   `display` 为 ≤15 ASCII 英文短句。
 - **Skill 审阅**：`app/hello_app/skills/server-incident-response.md` 需人工过一遍
   （比赛要求形成 Skill）。
+
+## 10. 2026-09-19：英文 LLM 结论分页与 ESP32-S3-EYE 五键注入
+
+- 诊断 prompt 与 `server-incident-response` Skill 已改为英文；JSON 增加 `display`，要求
+  仅含可打印 ASCII 且不超过 15 字符。`summary`、`reason` 也要求英文。
+- Agent 回发钩子把 summary、root cause、recommended action 写入
+  `/tmp/velaops-llm-pages.txt`，看板新增三页 LLM 内容页；告警弹窗仍只在异常或有动作时出现。
+- ESP32-S3-EYE 原理图确认 MENU/PLAY/UP+/DOWN 共用 ADC1_CH0 电阻梯（约 2.41/1.98/
+  0.82/0.38V），BOOT 保持 GPIO0。新增 `patches/vendor/0002-esp32s3-eye-adc-buttons.patch`，
+  开启 ADC1_CH0、注册 `/dev/adc0`，按电压映射五个按钮位；应用层用 UP/DOWN 翻页、
+  PLAY/MENU 长按批准，BOOT 不再批准。
+- 当前开发机目标构建被 `xtensa-esp32s3-elf-gcc: command not found` 阻断；主机 dashboard
+  与 Skill 合约测试通过，尚未进行真机烧录验证。
+
+## 11. 2026-09-19：真机联调——按键保底、LLM 链路两个真 bug
+
+### 11.1 编译/烧录（已打通）
+- 开发机重编前需先 `apply_nuttx_patches.sh`；`distclean` 会删除
+  `nuttx/arch/xtensa/src/esp32s3/esp-hal-3rdparty` 并重新 clone。GitHub 直连 TLS 经常失败，
+  实测可给 git 配置镜像：`git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"`
+  （GitHub 约 15KB/s → 镜像约 1.1MB/s，含 5 个子模块）。
+- HAL 子模块：`git -C esp-hal-3rdparty submodule update --init --depth=1 components/mbedtls/mbedtls
+  components/esp_phy/lib components/esp_wifi/lib components/bt/controller/lib_esp32c3_family components/esp_coex/lib`。
+- mbedtls 补丁在 HAL 仓库内 `nuttx/patches/components/mbedtls/mbedtls/*.patch`，**必须按 0001…0006 顺序**
+  逐个 `git apply`（一次性传多个会失败）。
+- 烧录：`esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 --before default-reset --after hard-reset write-flash 0x0 nuttx/nuttx.bin`。
+
+### 11.2 按键：ADC 四键读不到 → 先用 BOOT 保底
+- 原理图与官方 BSP 均确认 MENU/PLAY/UP+/DOWN 接 **ADC1_CH0（GPIO1）**，补丁引脚/通道正确；
+  但 NuttX `esp32s3_adc.c` 经 `ANIOC_TRIGGER`+`read` 读出**恒为 ~1334mV，按任何键不变**
+  （怀疑 S3 ADC 驱动/pad 配置问题）。`board_buttons()` 每次仍会调 ADC，`btn_read` 每次都会
+  重新采样，机制本身没问题。
+- 决策（用户选定）：**BOOT 保底**——短按翻页（6 页），长按 2 秒批准。保留 vendor 的 ADC 映射
+  以便日后修驱动；`patches/vendor/0002` 已补 `#include <sys/ioctl.h>`（原为隐式声明）。
+- 应用层：翻页判定的 `else` 分支前进一页；批准条件改为 `VELAOPS_BUTTON_BOOT`；弹窗文案改
+  `RESTART DEMO / BOOT 2S`；看板页脚 `BOOT: NEXT PAGE / BOOT: LLM PAGES`。Skill 与
+  `test_skill.py` 同步回 "physical BOOT-button approval"。
+
+### 11.3 LLM 链路两个真 bug（重要）
+1. **ask 文件通道只读第一行**：`patches/ai_agent/0001` 的 `fgets(line,1024)` 只取 `/tmp/vela-ask.txt`
+   的第一行，多行 prompt（Skill+证据）会被整体丢弃。因此必须发**单行**提示，让 Agent 自己按
+   Skill 调 `velaops_check_resources` 取证，再回结构化 JSON。旧的多行大提示设计无效。
+2. **"play " 子串误触发 NL 快速通道**：`agent_loop.c` 用 `strcasestr(text,"play ")` 匹配"播放音乐"，
+   而 `display must…` 含子串 `play `（dis**play **must），会把诊断请求误路由到 `music_search`
+   （发 HTTP 失败→回 "Error: HTTP"）。修法：诊断 prompt 里 `display` 后一律不跟空格
+   （写 `` `display` `` 或 `display,`）。
+
+### 11.4 看板/暂停健壮性
+- Agent 回包非 JSON（模型偶发寒暄/"让我查一下"）时，旧逻辑不写 `/tmp/velaops-llm-done`，
+  看板会一直暂停到兜底上限（原 600s）。改为：**任何 cli 回包都先写 done**（让看板立即恢复），
+  仅当回包含 `schema_version`+`status` 才解析/弹窗；兜底上限降到 **180s**。
+- LLM 诊断完成自动跳到 `LLM SUMMARY` 页（仅当 `/tmp/velaops-llm-pages.txt` 已写出时才跳）；
+  告警弹窗仍保留，短按 BOOT 消除后即见该页。
+
+### 11.5 已知遗留
+- NuttX ESP32-S3 ADC1_CH0 采样异常，ADC 四键暂不可用（驱动层问题）。
+- MiMo 模型输出不稳定：多次返回非 JSON（寒暄/中间态），演示存在不确定性；后续可考虑
+  温度=0、重试或换更稳模型。
+- 开机初期偶发 `配置加载失败: io_error`（autoconfig 写配置前的瞬时），随后自愈，无碍。

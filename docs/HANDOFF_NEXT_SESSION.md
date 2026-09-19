@@ -51,22 +51,36 @@
   看板 `io_error`。别再花时间在 WiFi。
 - **实体批准**：按键交互已通（看板线程统一读按键、长按 2s 写 `/tmp/velaops-approve`、
   达标即消弹窗），但重启请求在隧道上不稳。板子有 6 个功能键（RST 不可配，另 5 个：MENU/
-  UP+/DOWN/PLAY/BOOT），**NuttX 现仅注册 `BUTTON_BOOT`**。
+  UP+/DOWN/PLAY/BOOT）；**ADC 四键在 NuttX 上读不到（见任务 1），当前仅 BOOT 可用**。
 - 重启/复位：esptool 的 `run/chip-id` 会把板子带进 download 模式；用 `write-flash ... --after
   hard-reset` 或**物理重新上电**最可靠。
+- **LLM 提示两个坑（必须遵守）**：① ai_agent 文件 ask 通道**只读第一行**（`fgets` 1024），
+  诊断 prompt 必须单行；② `display ` 含子串 `play `，会被 NL 快速通道误判成播放音乐 →
+  prompt 里 `display` 后不要跟空格。
+- **重编前先把 HAL 下全**：`distclean` 会删 `nuttx/arch/xtensa/src/esp32s3/esp-hal-3rdparty`；
+  GitHub 直连慢，配镜像 `git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"`，
+  再 `git submodule update --init --depth=1 components/{mbedtls/mbedtls,esp_phy/lib,esp_wifi/lib,bt/controller/lib_esp32c3_family,esp_coex/lib}`，
+  并在 HAL 内按 0001…0006 顺序 `git apply nuttx/patches/components/mbedtls/mbedtls/*.patch`。
+
+### 上次任务完成情况（2026-09-19 本会话，改动未提交）
+1. **英文 LLM 结论 + 分页**：已完成。Skill 与 prompt 改英文，JSON 增加 `display`（≤15 ASCII）；
+   `velaops_agent_display.c` 写 `/tmp/velaops-llm-pages.txt`（summary/根因/建议三行），
+   看板 6 页（3 资源 + 3 LLM），诊断完成后**自动跳到 LLM SUMMARY 页**。
+2. **按键**：**未做成 ADC 四键，改 BOOT 保底**。原理图/BSP 确认四键在 ADC1_CH0（GPIO1），
+   但 NuttX `esp32s3_adc.c` 读出恒为 ~1334mV、按键无变化（驱动问题）。现 `BOOT` 短按翻页、
+   长按 2s 批准。vendor 补丁保留 ADC 映射待修。
+3. **Skill 审阅**：Skill 已英文化，待你人工审阅。
+4. 文档已更新（PROJECT_MEMORY 第 11 节、DEMO_RUNBOOK 第 9 节）。
 
 ### 本次要做的任务（按优先级）
-1. **让 LLM 充分发挥作用并上屏（主线）**：
-   - 把诊断 prompt 与 Skill 改为**英文**（LCD 仅 ASCII），要求 LLM 输出**英文** `display`
-     短句（≤15 ASCII）解释"是什么进程/建议怎么做"。
-   - 看板支持把 LLM 的**英文回复分页显示**（一屏放不下就分多屏）。
-2. **按键扩展**：在板级按钮驱动补上 ESP32-S3-EYE 其余功能键（查原理图 GPIO；参考
-   `vendor/espressif/boards/esp32s3/esp32s3-eye/src/esp32s3_buttons.c`，当前只有
-   `BUTTON_BOOT`）。用 **UP/DOWN 翻页**看 LLM 回复；把**批准改到 PLAY/MENU**（解放 BOOT）。
-   这属于板级改动 → 走 `patches/vendor`（或 `patches/nuttx`，看实际编译的是哪个副本）。
-3. **Skill 审阅**：`app/hello_app/skills/server-incident-response.md`（26 行，含中文
-   summary/evidence reason，输出契约见文末）→ 转英文并请我审阅（比赛要求形成 Skill）。
-4. 结束前更新 `docs/PROJECT_MEMORY.md`、`docs/DEMO_RUNBOOK.md`，并在需要时提交。
+1. **修 NuttX ESP32-S3 ADC 驱动**（若还想要四键）：让 ADC1_CH0/GPIO1 真正采样到电阻梯电压，
+   然后恢复 UP/DOWN 翻页、PLAY/MENU 批准。排查方向：`esp32s3_configgpio(1, INPUT|FUNCTION_1)`
+   的 pad 模拟配置、SAR 通道 mux、`ANIOC_TRIGGER`→`read` 时序；可用 `board_adc_button()`
+   打印原始 `am_data` 对照 2.41/1.98/0.82/0.38V 四档。
+2. **降 LLM 输出不确定性**：MiMo 多次返回非 JSON（寒暄/“让我查一下”）。可考虑温度=0、
+   非 JSON 自动重试 1 次、或换更稳模型；回包非 JSON 目前已有兜底（看板立即恢复 + 180s 上限）。
+3. **Skill 审阅 + 提交**：Skill 内容请我过一遍；改动按需 commit。
+4. 端到端复演一次「CPU 压满 → 弹窗+LED → LLM 诊断 → 自动跳 LLM 页 → 恢复」。
 
 ### 关键文件
 - 看板渲染：`app/hello_app/src/velaops_dashboard.c`（三页 + 弹窗渲染）

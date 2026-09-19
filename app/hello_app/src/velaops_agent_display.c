@@ -16,6 +16,7 @@
 #include "cJSON.h"
 
 #define VELAOPS_AGENT_POPUP_PATH "/tmp/velaops-popup.txt"
+#define VELAOPS_AGENT_PAGES_PATH "/tmp/velaops-llm-pages.txt"
 #define VELAOPS_AGENT_DONE_PATH "/tmp/velaops-llm-done"
 #define VELAOPS_AGENT_DISPLAY_TEXT_MAX 16
 
@@ -30,6 +31,30 @@ static void velaops_agent_upper(char *text)
           text[index] = (char)(text[index] - 'a' + 'A');
         }
     }
+}
+
+/* 保存三页 LCD 可读的英文摘要：结论、根因、建议。 */
+static void velaops_agent_ascii_line(const cJSON *item, char *output,
+                                     size_t capacity)
+{
+  const unsigned char *cursor;
+  size_t out = 0;
+
+  output[0] = '\0';
+  if (!cJSON_IsString(item) || item->valuestring == NULL)
+    {
+      return;
+    }
+  cursor = (const unsigned char *)item->valuestring;
+  while (*cursor != '\0' && out + 1 < capacity)
+    {
+      if (*cursor >= 0x20 && *cursor <= 0x7e)
+        {
+          output[out++] = (char)*cursor;
+        }
+      cursor++;
+    }
+  output[out] = '\0';
 }
 
 /* 从可能带 markdown 围栏的回复中截出 JSON 主体。 */
@@ -50,6 +75,12 @@ static void velaops_agent_map_display_text(const char *content, char *output,
   const cJSON *target;
   const cJSON *status;
   const cJSON *display;
+  const cJSON *summary;
+  const cJSON *causes;
+  const cJSON *first_cause;
+  const cJSON *cause_reason;
+  const cJSON *action_r;
+  const cJSON *action_target;
   char label[24];
 
   if (body == NULL)
@@ -71,6 +102,42 @@ static void velaops_agent_map_display_text(const char *content, char *output,
            cJSON_GetObjectItemCaseSensitive(recommendation, "target") : NULL;
   status = cJSON_GetObjectItemCaseSensitive(root, "status");
   display = cJSON_GetObjectItemCaseSensitive(root, "display");
+  summary = cJSON_GetObjectItemCaseSensitive(root, "summary");
+  causes = cJSON_GetObjectItemCaseSensitive(root, "root_cause_candidates");
+  first_cause = cJSON_IsArray(causes) ? cJSON_GetArrayItem(causes, 0) : NULL;
+  cause_reason = cJSON_IsObject(first_cause) ?
+                 cJSON_GetObjectItemCaseSensitive(first_cause, "reason") : NULL;
+  action_r = cJSON_IsObject(recommendation) ?
+             cJSON_GetObjectItemCaseSensitive(recommendation, "action") : NULL;
+  action_target = cJSON_IsObject(recommendation) ?
+                  cJSON_GetObjectItemCaseSensitive(recommendation, "target") : NULL;
+
+  {
+    char page_summary[80];
+    char page_cause[80];
+    char page_action[80];
+    FILE *pages = fopen(VELAOPS_AGENT_PAGES_PATH, "w");
+
+    velaops_agent_ascii_line(summary, page_summary, sizeof(page_summary));
+    velaops_agent_ascii_line(cause_reason != NULL ? cause_reason : first_cause,
+                             page_cause, sizeof(page_cause));
+    page_action[0] = '\0';
+    if (cJSON_IsString(action_r) && action_r->valuestring != NULL)
+      {
+        snprintf(page_action, sizeof(page_action), "%.48s %.24s",
+                 action_r->valuestring,
+                 cJSON_IsString(action_target) && action_target->valuestring != NULL
+                   ? action_target->valuestring : "");
+      }
+    velaops_agent_upper(page_summary);
+    velaops_agent_upper(page_cause);
+    velaops_agent_upper(page_action);
+    if (pages != NULL)
+      {
+        fprintf(pages, "%s\n%s\n%s\n", page_summary, page_cause, page_action);
+        fclose(pages);
+      }
+  }
 
   {
     const char *state = (cJSON_IsString(status) &&
@@ -193,17 +260,19 @@ void velaops_notify_agent_reply(const char *channel, const char *content)
     {
       return;
     }
-  if (strstr(content, "\"schema_version\"") == NULL ||
-      strstr(content, "\"status\"") == NULL)
-    {
-      return;
-    }
 
+  /* cli 回包即本轮 LLM 结束：先写 done 让看板恢复巡检，避免模型跑偏时停摆。 */
   file = fopen(VELAOPS_AGENT_DONE_PATH, "w");
   if (file != NULL)
     {
       fputs("done", file);
       fclose(file);
+    }
+
+  if (strstr(content, "\"schema_version\"") == NULL ||
+      strstr(content, "\"status\"") == NULL)
+    {
+      return;
     }
 
   text[0] = '\0';

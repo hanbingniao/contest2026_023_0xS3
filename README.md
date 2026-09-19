@@ -18,7 +18,11 @@ AI 硬件产品创新。
 - 修复后使用新的 request ID 再次取证，不把 Action 返回值直接当作恢复结论。
 - 看板巡检延迟到 Agent 网络建链稳定后再开始；掉线时只诊断不改接口，避免打断
   正常链路，`velaops net-check` 可现场复核。
-- ST7789 LCD 显示资源看板、故障状态和 Agent 弹窗；`velaops_show_message` 已真机验证显示 `TEST-OK`。
+- ST7789 LCD 提供 6 页看板：概览 / 性能 / 运维 + LLM SUMMARY / ROOT CAUSE / ACTION。
+  告警弹出闪烁告警框，LLM 诊断完成后**自动跳到 LLM SUMMARY 页**；`BOOT` 短按翻页、
+  长按 2 秒批准；`velaops_show_message` 已真机验证显示 `TEST-OK`。
+- 默认演示链路为**有线串口隧道**：板端 HTTP 经 USB CDC 交给主机 relay 转发到 Proxy/LLM，
+  避开 WiFi 不稳定；SD 凭据卡 `TRANSPORT=serial|wifi` 一键切换。
 - MiMo 不可用时可使用本地规则降级，安全输出结构化诊断且不执行变更。
 
 ## 系统架构
@@ -38,16 +42,18 @@ VelaOps Proxy（认证、防重放、Schema、白名单、审计）
 Linux 演示服务 / 端口 / 内存 / 磁盘
 ```
 
-比赛 Demo 使用可信局域网 HTTP + HMAC。设备密钥、Wi-Fi 密码和 MiMo API Key 仅保存在本地私密配置中，不提交到 Git。
+默认演示链路：`板端 HTTP → 串口隧道（USB CDC）→ 主机 relay → Proxy / MiMo 转发器`，
+有线稳定、无需 WiFi；按需可切回局域网 HTTP + HMAC。设备密钥、Wi-Fi 密码和 MiMo API Key
+仅保存在本地私密配置中，不提交到 Git。
 
 ## 赛道要求对应
 
 | 要求 | 本项目实现 |
 | --- | --- |
-| openvela + ai_agent 真机运行 | ESP32-S3-EYE 完成联网、LLM、Tool 和 LCD 真机闭环 |
-| 至少一种交互 Channel | NSH/文件队列 Channel；主机 Debug GUI 提供联调入口 |
-| 自定义 Skill | `app/hello_app/skills/server-incident-response.md` |
-| 主动触发场景 | 后台资源巡检触发去抖后的异常/恢复事件 |
+| openvela + ai_agent 真机运行 | ESP32-S3-EYE 完成 LLM、Tool 和 LCD 真机闭环 |
+| 至少一种交互 Channel | ai_agent 文件 ask 队列 Channel（`/tmp/vela-ask.txt`）；主机 Debug GUI 提供联调入口 |
+| 自定义 Skill | `app/hello_app/skills/server-incident-response.md`（英文，含结构化输出契约） |
+| 主动触发场景 | 后台资源巡检触发去抖后的异常/恢复事件，自动注入 LLM 诊断 |
 | 工具执行场景 | 只读取证、LCD 弹窗、实体批准后的白名单服务修复 |
 | 队伍仓边界 | 作品代码、补丁、文档和日志均位于本队仓库 |
 
@@ -65,10 +71,10 @@ contest2026_023_0xS3.xml
 
 ## 编译与烧录
 
-完整环境和故障恢复步骤以 `docs/DEMO_RUNBOOK.md` 为准。以下命令均在 openvela 工作区执行：
+完整环境和故障恢复步骤以 `docs/DEMO_RUNBOOK.md` 为准。以下命令均在 openvela 工作区执行
+（`cd <openvela 工作区>`）：
 
 ```bash
-cd /home/lu/桌面/openvela
 bash contest2026_023_0xS3/docs/tools/apply_nuttx_patches.sh
 
 export PATH="$PWD/prebuilts/gcc/linux-x86_64/xtensa-esp32s3-elf/bin:$PATH"
@@ -82,14 +88,21 @@ esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 \
   write-flash 0x0 nuttx/nuttx.bin
 ```
 
+> `distclean` 会删除 `esp-hal-3rdparty` 并重新 clone；该仓库在 GitHub 上较慢，可先配镜像
+> `git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"`，
+> 再 `submodule update --init --depth=1 components/{mbedtls/mbedtls,esp_phy/lib,esp_wifi/lib,bt/controller/lib_esp32c3_family,esp_coex/lib}`，
+> 并在 HAL 内按 `0001…0006` 顺序 `git apply nuttx/patches/components/mbedtls/mbedtls/*.patch`。
+
 ## Demo 启动
 
-1. 在队伍目录准备本地私密环境文件 `.velaops.local.env`，不要提交该文件。
-2. 使用 `docs/tools/prepare_live_demo.py` 生成配对的 Proxy/设备临时配置。
-3. 启动演示目标、局域网 NTP、VelaOps Proxy 和限制客户端 IP 的 MiMo 转发器。
-4. 复位开发板，连接 Wi-Fi，创建 `/data/velaops` 并下发设备配置。
-5. 执行 `docs/tools/provision_ai_agent_assets.sh` 安装 Skill/Provider 资产。
-6. 启动 `docs/tools/debug_event_gui.py`，触发资源巡检或 LCD Debug 事件。
+1. 在队伍目录准备本地私密环境文件 `.velaops.local.env`（含 MiMo API Key 等），不要提交。
+2. 启动主机侧服务：VelaOps Proxy、MiMo 转发器、局域网 NTP、演示目标
+   （`docs/tools/install_demo_services.sh`）。
+3. 启动串口 relay：`PORT=/dev/ttyACM0 python3 docs/tools/serial_llm_relay.py`
+   （自动探测 `ttyACM*`、断线重连）。
+4. SD 凭据卡写入 `TRANSPORT=serial`，给开发板物理上电；板端自动认证、拉起看板并巡检。
+5. 触发演示：`python3 docs/tools/stress_cpu.py --seconds 200` 压满主机 CPU →
+   看板弹出告警框 + LED 闪烁 → LLM 诊断上屏并自动跳到 LLM SUMMARY 页；停压测后自动恢复。
 
 受限 MiMo 转发器示例：
 
