@@ -145,9 +145,15 @@ def _reader(fd: int, events: "queue.Queue[tuple]") -> None:
         except BlockingIOError:
             continue
         except OSError:
-            break
+            # 串口断开（板子重新上电会换 ttyACM 号）：退出进程，交给 systemd
+            # Restart=always 重新探测端口，避免拿旧 fd 干等。
+            sys.stderr.write("[relay] 串口断开，退出以便重启重连\n")
+            sys.stderr.flush()
+            os._exit(1)
         if not data:
-            break
+            sys.stderr.write("[relay] 串口 EOF，退出以便重启重连\n")
+            sys.stderr.flush()
+            os._exit(1)
 
         buffer += data
         while b"\n" in buffer:
