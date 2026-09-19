@@ -67,7 +67,7 @@
 #define VELAOPS_INCIDENT_FAILURE_THRESHOLD 2
 #define VELAOPS_INCIDENT_RECOVERY_THRESHOLD 2
 #define VELAOPS_APPROVAL_HOLD_MS 2000
-#define VELAOPS_APPROVAL_TIMEOUT_MS 30000
+#define VELAOPS_APPROVAL_TIMEOUT_MS 60000
 #define VELAOPS_APPROVAL_VALIDITY_SECONDS 60
 #define VELAOPS_REPAIR_REQUEST_CAPACITY 512
 #define VELAOPS_REPAIR_RESULT_CAPACITY 320
@@ -472,6 +472,7 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
   char request_body[VELAOPS_REPAIR_REQUEST_CAPACITY];
   char resources[VELAOPS_RESOURCE_RESULT_CAPACITY];
   bool recovered;
+  bool request_sent;
   time_t approved_at;
   unsigned int attempt;
 
@@ -486,14 +487,25 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
           output, output_capacity);
     }
 
-  printf("velaops: 请在 30 秒内连续长按 BOOT 2 秒批准重启 demo 服务\n");
-  /* 设备侧明确提示实体批准，避免操作者不知按哪个键/何时按。 */
-  velaops_popup_write("APPROVAL", "PRESS BOOT 2S");
+  printf("velaops: 请在 60 秒内按住 BOOT 2 秒批准重启 demo 服务\n");
+  /* 明确"批准什么动作 + 怎么按"：前 12 字符一行，后 12 字符一行。 */
+  velaops_popup_write("APPROVAL", "RESTART DEMOHOLD BOOT 2S");
+  /* 从等待批准开始就置 busy：让看板不抢着消除弹窗、不抢隧道。 */
+  {
+    FILE *busy = fopen(VELAOPS_LLM_BUSY_PATH, "w");
+
+    if (busy != NULL)
+      {
+        fputs("approval", busy);
+        fclose(busy);
+      }
+  }
   approval_result = velaops_button_wait_for_long_press(
       VELAOPS_APPROVAL_HOLD_MS, VELAOPS_APPROVAL_TIMEOUT_MS);
   if (approval_result == VELAOPS_BUTTON_TIMEOUT)
     {
       velaops_popup_write("APPROVAL", "TIMEOUT");
+      unlink(VELAOPS_LLM_BUSY_PATH);
       return velaops_guarded_repair_format_result(
           "not_started", false, "approval_timeout", 0,
           output, output_capacity);
@@ -503,28 +515,36 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
       sizeof(approval_random))
     {
       velaops_popup_write("APPROVAL", "REJECTED");
+      unlink(VELAOPS_LLM_BUSY_PATH);
       return velaops_guarded_repair_format_result(
           "not_started", false, "approval_unavailable", 0,
           output, output_capacity);
     }
 
   velaops_popup_write("REPAIR", "IN PROGRESS");
+  /* 修复期间让看板暂停巡检，避免与重启/复核请求抢单条隧道导致超时。 */
+  {
+    FILE *busy = fopen(VELAOPS_LLM_BUSY_PATH, "w");
+
+    if (busy != NULL)
+      {
+        fputs("repair", busy);
+        fclose(busy);
+      }
+  }
   approved_at = time(NULL);
   velaops_hex_encode(approval_random, sizeof(approval_random), approval_id);
-  if (velaops_guarded_repair_build_request(
-          approval_id, (int64_t)approved_at,
-          (int64_t)approved_at + VELAOPS_APPROVAL_VALIDITY_SECONDS,
-          request_body, sizeof(request_body)) != 0 ||
-      velaops_post_request(VELAOPS_ACTION_TARGET, request_body,
-                           "白名单服务重启", false, false, NULL,
-                           NULL, 0) != EXIT_SUCCESS)
-    {
-      /* 传输中断时无法证明服务端是否执行，必须报告 unknown 而不是盲目重试。 */
-      velaops_popup_write("REPAIR", "EXEC FAILED");
-      return velaops_guarded_repair_format_result(
-          "unknown", false, "execution_failed", 0,
-          output, output_capacity);
-    }
+
+  /* 重启请求的回包可能因传输抖动丢失，但服务端其实已执行；因此**无论请求
+   * 返回值如何都继续做只读复核**，用独立证据判定成败，而不是一见超时就报
+   * unknown。复核成功则视为已完成（verified=true）。 */
+  request_sent = velaops_guarded_repair_build_request(
+                     approval_id, (int64_t)approved_at,
+                     (int64_t)approved_at + VELAOPS_APPROVAL_VALIDITY_SECONDS,
+                     request_body, sizeof(request_body)) == 0 &&
+                 velaops_post_request(VELAOPS_ACTION_TARGET, request_body,
+                                      "白名单服务重启", false, false, NULL,
+                                      NULL, 0) == EXIT_SUCCESS;
 
   for (attempt = 1; attempt <= VELAOPS_REPAIR_VERIFY_ATTEMPTS; attempt++)
     {
@@ -538,10 +558,20 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
           recovered)
         {
           velaops_popup_write("REPAIR", "OK RECOVERED");
+          unlink(VELAOPS_LLM_BUSY_PATH);
           return velaops_guarded_repair_format_result(
               "completed", true, "recovered", attempt,
               output, output_capacity);
         }
+    }
+
+  unlink(VELAOPS_LLM_BUSY_PATH);
+  if (!request_sent)
+    {
+      velaops_popup_write("REPAIR", "EXEC FAILED");
+      return velaops_guarded_repair_format_result(
+          "unknown", false, "execution_failed", 0,
+          output, output_capacity);
     }
   velaops_popup_write("REPAIR", "VERIFY FAILED");
   return velaops_guarded_repair_format_result(
@@ -825,8 +855,13 @@ static void *velaops_button_worker(void *argument)
               (context->previous & context->supported) == 0)
             {
               pthread_mutex_lock(context->display_lock);
-              if (context->alarm_active != NULL &&
-                  *context->alarm_active != 0)
+              if (access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0)
+                {
+                  /* 批准/修复进行中：这次按键是给"长按批准"用的，看板不要
+                   * 抢着消除弹窗，否则用户一按提示就消失、体验很差。 */
+                }
+              else if (context->alarm_active != NULL &&
+                       *context->alarm_active != 0)
                 {
                   /* 告警弹窗优先：短按 BOOT 先消除弹窗，回到看板。 */
                   *context->alarm_active = 0;
@@ -1233,10 +1268,11 @@ int main(int argc, char *argv[])
 
           if (time(NULL) >= next_refresh)
             {
-              /* LLM 诊断窗口内让路：隧道同一时刻只能服务一个请求，
-               * 若与看板巡检并发会导致隧道卡死。 */
-              if (g_llm_pause_until > 0 &&
-                  time(NULL) < g_llm_pause_until)
+              /* LLM 诊断 / 实体批准修复期间让路：隧道同一时刻只能服务一个请求，
+               * 若与看板巡检并发会让批准后的重启请求超时失败。 */
+              if ((g_llm_pause_until > 0 &&
+                   time(NULL) < g_llm_pause_until) ||
+                  access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0)
                 {
                   /* Agent 回发钩子标记诊断完成即放行，否则等到兜底上限。 */
                   if (access(VELAOPS_LLM_DONE_PATH, F_OK) == 0)
