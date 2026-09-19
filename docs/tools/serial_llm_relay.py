@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import base64
+import glob
 import os
 import queue
 import select
@@ -306,8 +307,26 @@ def _push_b64_verified(fd: int, events: "queue.Queue[tuple]", b64: bytes,
     return False
 
 
+def _open_port() -> int:
+    """打开板端串口；复位/重新上电后 USB CDC 会在 ttyACM0/1 间跳变，自动探测。"""
+    candidates = [PORT]
+    candidates += sorted(p for p in glob.glob("/dev/ttyACM*")
+                         if p != PORT)
+    last_error: Exception | None = None
+    for port in candidates:
+        try:
+            fd = serial_push._open_raw_tty(port)
+            if port != PORT:
+                sys.stderr.write(f"[relay] 端口 {PORT} 不可用，改用 {port}\n")
+                sys.stderr.flush()
+            return fd
+        except OSError as exc:
+            last_error = exc
+    raise SystemExit(f"[relay] 无法打开串口 {candidates}: {last_error}")
+
+
 def main() -> int:
-    fd = serial_push._open_raw_tty(PORT)
+    fd = _open_port()
     events: "queue.Queue[tuple]" = queue.Queue()
     threading.Thread(target=_reader, args=(fd, events), daemon=True).start()
     sys.stderr.write(
