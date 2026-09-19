@@ -154,14 +154,16 @@ class HttpServerTest(unittest.TestCase):
             self.audit.events[-1].error_code.value, "signature_mismatch"
         )
 
-    def test_replay_is_rejected(self):
+    def test_replay_within_tolerance_is_accepted(self):
+        # 串口隧道 ACK 丢失时的同请求重发在容忍窗口内被接受（由执行层幂等兜底），
+        # 超出窗口的重复 nonce 才会被拒（见 test_auth）。
         body = b"{}"
         headers = self.signed_headers(body)
         self.assertEqual(
             self.request("POST", "/v1/auth/check", body, headers)[0], 200
         )
         self.assertEqual(
-            self.request("POST", "/v1/auth/check", body, headers)[0], 401
+            self.request("POST", "/v1/auth/check", body, headers)[0], 200
         )
 
     def test_invalid_json_is_rejected_after_authentication(self):

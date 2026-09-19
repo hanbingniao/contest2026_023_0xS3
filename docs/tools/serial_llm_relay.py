@@ -259,26 +259,33 @@ def _write_nsh(fd: int, command: str) -> None:
             sys.stderr.flush()
 
 
+def _write_nsh_expect(fd: int, command: str, char_delay: float,
+                      expect: str) -> None:
+    with _WRITE_LOCK:
+        try:
+            _send_line(fd, command, char_delay, expect=expect)
+            time.sleep(0.02)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[relay] 写串口失败（已忽略）: {exc}\n")
+            sys.stderr.flush()
+
+
 def _push_b64(fd: int, b64: bytes, remote: str) -> None:
     """以 base64 字面量 echo 追加写入。
 
-    快发会丢字符导致文件被截断（实测只写进 2 行），这里逐字符放慢并给每条命令
-    留出处理时间；板端解码器只认 base64 字符，不能加任何前缀。"""
+    关键：**每行各自加锁**，不在整段回写期间独占写锁——否则主循环的 ACK 会被
+    整段推送推迟，板端等不到 ACK 就重发，重发又被 Proxy 判 replay，导致"服务已
+    重启却报 EXEC FAILED"。逐行加锁后 ACK 最多延迟一行。"""
     _write_nsh(fd, f"rm -f {remote}")
     text = b64.decode("ascii")
     char_delay = float(os.environ.get("PUSH_CHAR_DELAY", "0.001"))
     line_delay = float(os.environ.get("PUSH_LINE_DELAY", "0.05"))
-    with _WRITE_LOCK:
-        try:
-            for i in range(0, len(text), 48):
-                chunk = text[i:i + 48]
-                command = f"echo '{chunk}' >> {remote}"
-                # 用 base64 片段本身作为回显判据（各段唯一）；等回显再发下一段。
-                _send_line(fd, command, char_delay, expect=chunk)
-                time.sleep(line_delay)
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[relay] 回写响应失败（已忽略）: {exc}\n")
-            sys.stderr.flush()
+    for i in range(0, len(text), 48):
+        chunk = text[i:i + 48]
+        command = f"echo '{chunk}' >> {remote}"
+        # 用 base64 片段本身作为回显判据（各段唯一）；等回显再发下一段。
+        _write_nsh_expect(fd, command, char_delay, chunk)
+        time.sleep(line_delay)
 
 
 def _read_remote(fd: int, events: "queue.Queue[tuple]", remote: str,

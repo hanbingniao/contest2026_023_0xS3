@@ -67,7 +67,7 @@
 #define VELAOPS_INCIDENT_FAILURE_THRESHOLD 2
 #define VELAOPS_INCIDENT_RECOVERY_THRESHOLD 2
 #define VELAOPS_APPROVAL_HOLD_MS 2000
-#define VELAOPS_APPROVAL_TIMEOUT_MS 60000
+#define VELAOPS_APPROVAL_TIMEOUT_MS 120000
 #define VELAOPS_APPROVAL_VALIDITY_SECONDS 60
 #define VELAOPS_REPAIR_REQUEST_CAPACITY 512
 #define VELAOPS_REPAIR_RESULT_CAPACITY 320
@@ -487,7 +487,7 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
           output, output_capacity);
     }
 
-  printf("velaops: 请在 60 秒内按住 BOOT 2 秒批准重启 demo 服务\n");
+  printf("velaops: 请在 120 秒内按住 BOOT 2 秒批准重启 demo 服务\n");
   /* 明确"批准什么动作 + 怎么按"：前 12 字符一行，后 12 字符一行。 */
   velaops_popup_write("APPROVAL", "RESTART DEMOHOLD BOOT 2S");
   /* 从等待批准开始就置 busy：让看板不抢着消除弹窗、不抢隧道。 */
