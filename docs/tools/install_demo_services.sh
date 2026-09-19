@@ -100,7 +100,7 @@ Description=VelaOps disposable demo target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -m http.server 28791 --bind 127.0.0.1
+ExecStart=/usr/bin/python3 -u $team_root/docs/tools/demo_target_app.py 28791
 Restart=no
 
 [Install]
