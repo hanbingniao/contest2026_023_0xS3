@@ -733,21 +733,24 @@ static void velaops_monitor_repair_network(bool force)
 }
 
 /* 串口模式（设备配置指向隧道）无建链竞态，立即巡检；WiFi 模式延迟启动。 */
-static unsigned int velaops_monitor_startup_delay(void)
+static bool velaops_monitor_is_serial(void)
 {
   velaops_device_config_t config;
-  unsigned int delay = VELAOPS_MONITOR_WIFI_STARTUP_DELAY_SECONDS;
+  bool serial = false;
 
   if (velaops_device_config_load(VELAOPS_CONFIG_FILE, &config) ==
       VELAOPS_CONFIG_OK)
     {
-      if (strcmp(config.host, VELAOPS_TUNNEL_HOST) == 0)
-        {
-          delay = 0;
-        }
+      serial = strcmp(config.host, VELAOPS_TUNNEL_HOST) == 0;
       velaops_device_config_clear(&config);
     }
-  return delay;
+  return serial;
+}
+
+static unsigned int velaops_monitor_startup_delay(void)
+{
+  return velaops_monitor_is_serial() ?
+         0 : VELAOPS_MONITOR_WIFI_STARTUP_DELAY_SECONDS;
 }
 
 /* 板载 LED（ESP32-S3-EYE 经 /dev/userleds 暴露 1 个灯）：随告警框闪烁。 */
@@ -1099,6 +1102,8 @@ int main(int argc, char *argv[])
       int blink_tick = 0;
       int led_fd;
       int attempt;
+      int link_state = 0;   /* 0=等待首个成功连接 1=已连接 2=连接中断 */
+      int was_link = 1;
       time_t next_redraw = 0;
       char alarm_text[25] = {0};
 
@@ -1164,11 +1169,11 @@ int main(int argc, char *argv[])
           velaops_display_close(display);
           return EXIT_FAILURE;
         }
-      /* 开机画面：先显示品牌启动框，避免上电后 LCD 长时间白屏。 */
+      /* 开机画面：先显示品牌启动框，避免上电后 LCD 长时间白屏；随后主循环
+       * 会按连接状态显示 CONNECTION 页或资源看板。 */
       velaops_display_show_message(display, "VELAOPS", "BOOTING", 0);
       sleep(4);
 
-      velaops_display_show(display, &state, page);
       next_refresh = time(NULL) + velaops_monitor_startup_delay();
       for (;;)
         {
@@ -1224,10 +1229,11 @@ int main(int argc, char *argv[])
                       VELAOPS_ACTION_TARGET, VELAOPS_CHECK_RESOURCES_BODY,
                       NULL, false, false, &refreshed,
                       resources, sizeof(resources));
-                  if (request_status == EXIT_SUCCESS)
-                    {
-                      consecutive_failures = 0;
-                      incident_status =
+                   if (request_status == EXIT_SUCCESS)
+                     {
+                       consecutive_failures = 0;
+                       link_state = 1;
+                       incident_status =
                           velaops_resource_incident_apply_observation(
                               &resource_incident, &refreshed.resources,
                               refreshed.observed_at, &incident_event,
@@ -1288,11 +1294,19 @@ int main(int argc, char *argv[])
                             }
                         }
                     }
-                  else if (++consecutive_failures >=
-                           VELAOPS_MONITOR_REPAIR_AFTER_FAILURES)
+                  else
                     {
-                      velaops_monitor_repair_network(false);
-                      consecutive_failures = 0;
+                      /* 连续失败两次即视为连接中断，屏上给出提示。 */
+                      if (consecutive_failures >= 1)
+                        {
+                          link_state = 2;
+                        }
+                      if (++consecutive_failures >=
+                          VELAOPS_MONITOR_REPAIR_AFTER_FAILURES)
+                        {
+                          velaops_monitor_repair_network(false);
+                          consecutive_failures = 0;
+                        }
                     }
                   /* 只在成功巡检时追加 CPU 历史，失败轮保持曲线连续。 */
                   if (request_status == EXIT_SUCCESS)
@@ -1323,7 +1337,8 @@ int main(int argc, char *argv[])
               }
           }
 
-          if (alarm_active)
+          /* 告警框或连接状态框激活时按节奏闪烁（板载 LED 同步）。 */
+          if (alarm_active || link_state != 1)
             {
               if (++blink_tick >= 2)
                 {
@@ -1332,7 +1347,7 @@ int main(int argc, char *argv[])
                   force_render = 1;
                 }
             }
-          else if (was_alarm)
+          else if (was_alarm || was_link)
             {
               force_render = 1;
             }
@@ -1343,6 +1358,7 @@ int main(int argc, char *argv[])
               velaops_display_state_t snapshot = state;
               unsigned int page_snapshot = page;
               int active = alarm_active;
+              int linked = link_state;
               char text[25];
 
               memcpy(text, alarm_text, sizeof(text));
@@ -1352,7 +1368,18 @@ int main(int argc, char *argv[])
                 {
                   velaops_display_show_message(display, "ALERT", text,
                                                blink_phase);
-                  /* 板载 LED 随告警框同节奏闪烁。 */
+                  velaops_monitor_led(led_fd, blink_phase);
+                }
+              else if (linked != 1)
+                {
+                  /* 未连上/连接中断：显示连接状态页，避免用户看到空看板。 */
+                  char link[24];
+
+                  snprintf(link, sizeof(link), "%s %s",
+                           velaops_monitor_is_serial() ? "SERIAL" : "WIFI",
+                           linked == 0 ? "WAIT RELAY" : "LINK DOWN");
+                  velaops_display_show_message(display, "CONNECTION", link,
+                                               blink_phase);
                   velaops_monitor_led(led_fd, blink_phase);
                 }
               else
@@ -1363,6 +1390,7 @@ int main(int argc, char *argv[])
               force_render = 0;
             }
           was_alarm = alarm_active;
+          was_link = (link_state != 1);
           usleep(200000);
         }
     }
