@@ -272,3 +272,51 @@ AI 只读诊断、主动触发、实体批准和设备侧复核已形成可演�
 - 已知遗留：单串口被日志与帧复用，偶发插帧会让 relay 丢帧；未做重发（会触发
   Proxy 的 `replay_detected`）。详见 `docs/SERIAL_TRANSPORT.md`。
 - 交接文档：`docs/SERIAL_TRANSPORT.md`（设计/开关/准备/已知问题/切回 WiFi）。
+
+## 9. 2026-09-19：看板增强、CPU 告警、LLM 上屏、实体批准与 WiFi 复测
+
+### 本次交付
+- **三页看板重做**（概览/性能/运维）：CPU/MEM/DISK 大数值+仪表、CPU 负载+历史曲线、
+  服务/端口/磁盘；数值全整数格式化，避免该路径上的浮点/长整型 printf 风险。
+- **CPU 监控**：Proxy 从 `/proc/stat` 差分 + `getloadavg` 采样 `cpu`；
+  新增 `top_process`（`ps -eo args=,pcpu=` 取占用最高进程），供 LLM 指出"谁在吃 CPU"。
+- **主动告警**：阈值 CPU≥85% / 内存≥80% / 磁盘≥90% / 服务非 active / 端口不可达；
+  触发后 LCD 弹闪烁告警框 + **板载 LED（`/dev/userleds`）同步闪烁**；本地摘要带元凶进程
+  （如 `stress_cpu.py 96%`）。
+- **LLM 上屏**：ai_agent outbound 弱钩子（函数指针注册）把诊断结论映射为短英文写入
+  `/tmp/velaops-popup.txt`，看板弹窗更新（如 `CPU HIGH`）；prompt 要求输出 `display`
+  字段（≤15 ASCII）。诊断完成信号 `/tmp/velaops-llm-done` 让看板按完成放行。
+- **开机体验**：看板在 autoconfig 最开始即启动（不再等认证），显示 `VELAOPS/BOOTING`
+  开机画面，未连上时显示 `CONNECTION / SERIAL WAIT RELAY`，连上后进看板；显示设备
+  open 重试 + 每 2s 强制重绘自愈花屏。
+- **稳定性**：LLM 请求与板端隧道请求共用同一把有界锁（`llm_set_io_lock_hook`）；
+  relay 转发移入工作线程 + 丢弃过期 xid 响应 + 90s 快速 504；串口写 EAGAIN 处理；
+  auth nonce 增加 40s 有界重传容忍（执行仍按 request_id 幂等）。多次真机：
+  告警→诊断→恢复 全程 `invalid_response/transport_error/panic` 全 0。
+- **上游 0 改动**：ai_agent 的两处钩子与 ask 文件队列通道全部在 `patches/ai_agent/`，
+  由 `apply_nuttx_patches.sh` 编译前注入。
+
+### 实体批准（当前状态：交互通、执行不稳）
+- 看板按键线程统一读 `/dev/buttons`，长按 2s 写 `/tmp/velaops-approve`，修复流程据此
+  放行；批准弹窗长按达标即消、回看板。
+- 但单条半双工隧道下，"重启请求"偶发 `transport_error/no-ack`，Proxy 未执行、有时短暂
+  拖累链路（看板显示 `SERIAL LINK DOWN`，复位恢复）。**结论：不换独立 UART/多连接难以
+  100% 稳定**，故比赛演示主线调整为"告警→LLM 诊断"，批准仅讲设计。
+
+### WiFi 复测（2026-09-19）
+- 已具备同网段条件（板子 `10.93.57.80`、开发机 `10.93.57.90`），且凭据可一键
+  `TRANSPORT=wifi` 切换（Proxy/转发器需监听局域网、白名单板子 IP）。
+- 实测：**板端 autoconfig 卡在"连接 WiFi"阶段**（日志止于 `TF 已挂载`，无 `传输模式`），
+  设备配置未写入 → 看板 `配置加载失败: io_error`、隧道未起。**仍是 WiFi 驱动的坑**，
+  与当初放弃 WiFi 的结论一致。已回退 `TRANSPORT=serial` 并恢复有线。
+- 注：推送 SD 凭据（`serial_push.py`）时若板端控制台被刷屏，首行可能被冲散，需回读校验。
+
+### 下一步（新会话）
+- **按键扩展**：ESP32-S3-EYE 有 6 个功能键（RST 不可配，另 5 个可配：MENU/UP+/DOWN/
+  PLAY/BOOT），但 NuttX 现仅注册 `BUTTON_BOOT`。需在板级按钮驱动补上其余按键 GPIO
+  （查 esp32-s3-eye 原理图）→ 用 `UP/DOWN` 翻页、`PLAY/MENU` 做批准（解放 BOOT）。
+- **LLM 结论分页上屏**：把 LLM 英文回复切成多屏，用 UP/DOWN 翻页，充分展示 AI 作用
+  （解释进程/给建议）。Skill 与诊断 prompt 均改为英文（LCD 仅 ASCII），并要求
+  `display` 为 ≤15 ASCII 英文短句。
+- **Skill 审阅**：`app/hello_app/skills/server-incident-response.md` 需人工过一遍
+  （比赛要求形成 Skill）。
