@@ -288,8 +288,11 @@ static int velaops_post_request(const char *target, const char *body,
 
   http_context.host = config.host;
   http_context.port = config.port;
+  /* 诊断或实体批准/修复进行中：都使用"耐心排队"的长超时，避免突发请求
+   * 被 15s 短超时打断而报 transport_error。 */
   http_context.timeout_seconds =
-      access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0 ?
+      (access(VELAOPS_LLM_BUSY_PATH, F_OK) == 0 ||
+       access(VELAOPS_REPAIR_BUSY_PATH, F_OK) == 0) ?
       VELAOPS_HTTP_TIMEOUT_BUSY_SECONDS : VELAOPS_HTTP_TIMEOUT_SECONDS;
   client.device_id = config.device_id;
   client.secret = (const uint8_t *)config.secret;
@@ -532,6 +535,9 @@ static int velaops_repair_demo_service(char *output, size_t output_capacity)
           output, output_capacity);
     }
 
+  /* 先等一拍：让看板在途巡检请求收尾（repair-busy 已置位，后续不再发新巡检），
+   * 减少重启请求与巡检在单条隧道上的时序冲突。 */
+  sleep(2);
   approved_at = time(NULL);
   velaops_hex_encode(approval_random, sizeof(approval_random), approval_id);
 
@@ -895,6 +901,13 @@ static void *velaops_button_worker(void *argument)
                   fclose(file);
                 }
               approved = 1;
+              /* 长按达标即视为批准：立刻消掉批准弹窗回到看板，重启在后台继续。 */
+              pthread_mutex_lock(context->display_lock);
+              if (context->alarm_active != NULL)
+                {
+                  *context->alarm_active = 0;
+                }
+              pthread_mutex_unlock(context->display_lock);
             }
 
           if (pressed && (context->previous & context->supported) == 0)
