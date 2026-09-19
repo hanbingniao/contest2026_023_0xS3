@@ -79,7 +79,7 @@ esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 460800 \
 
 ## Demo 启动
 
-1. 在队伍目录准备本地私密环境文件 `.velaops.local.env`（含 MiMo API Key 等），不要提交。
+1. 在项目目录准备本地私密环境文件 `.velaops.local.env`（含 MiMo API Key 等），不要提交。
 2. 启动主机侧服务：VelaOps Proxy、MiMo 转发器、局域网 NTP、演示目标
    （`docs/tools/install_demo_services.sh`）。
 3. 启动串口 relay：`PORT=/dev/ttyACM0 python3 docs/tools/serial_llm_relay.py`
